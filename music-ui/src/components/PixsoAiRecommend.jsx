@@ -2,7 +2,7 @@ import React from 'react';
 import { Card, Input, Typography, Avatar, Space, Button, Progress } from 'antd';
 import {
   SearchOutlined,
-  MusicOutlined,
+  SoundOutlined,
   RobotOutlined,
   HomeOutlined,
   BarChartOutlined,
@@ -13,7 +13,6 @@ import {
   PauseCircleFilled,
   RetweetOutlined,
   HeartOutlined,
-  SoundOutlined,
 } from '@ant-design/icons';
 import './PixsoAiRecommend.css';
 
@@ -24,7 +23,7 @@ const PixsoAiRecommend = () => {
     <div className="pixso-ai-recommend">
       <aside className="pixso-sidebar">
         <Space direction="vertical" size="middle" className="pixso-sidebar-icons">
-          <Button type="primary" shape="circle" icon={<MusicOutlined />} />
+          <Button type="primary" shape="circle" icon={<SoundOutlined />} />
           <Button shape="circle" icon={<RobotOutlined />} />
           <Button shape="circle" icon={<BarChartOutlined />} />
           <Button shape="circle" icon={<SettingOutlined />} />

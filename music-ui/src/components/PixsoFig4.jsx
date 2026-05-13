@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Layout, Menu, Card, Typography, Switch, Radio, Space, Divider } from 'antd';
-import { HomeOutlined, CompassOutlined, LibraryOutlined, SettingOutlined, SunOutlined, MoonOutlined, DesktopOutlined } from '@ant-design/icons';
+import { HomeOutlined, CompassOutlined, BookOutlined, SettingOutlined, SunOutlined, MoonOutlined, DesktopOutlined } from '@ant-design/icons';
 import './PixsoFig4.css';
 
 const { Sider, Content } = Layout;
@@ -14,7 +14,7 @@ const PixsoFig4 = () => {
   const menuItems = [
     { key: 'home', icon: <HomeOutlined />, label: 'Home' },
     { key: 'explore', icon: <CompassOutlined />, label: 'Explore' },
-    { key: 'library', icon: <LibraryOutlined />, label: 'Library' },
+    { key: 'library', icon: <BookOutlined />, label: 'Library' },
     { key: 'settings', icon: <SettingOutlined />, label: 'Settings' },
   ];
 

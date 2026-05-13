@@ -1,6 +1,6 @@
 import React from 'react';
 import { Layout, Menu, Input, Card, Typography, Avatar, Button, Progress, Space } from 'antd';
-import { SearchOutlined, HomeOutlined, CompassOutlined, LibraryOutlined, SettingsOutlined } from '@ant-design/icons';
+import { SearchOutlined, HomeOutlined, CompassOutlined, BookOutlined, SettingOutlined } from '@ant-design/icons';
 import './PixsoFig3.css';
 
 const { Sider, Content } = Layout;
@@ -11,8 +11,8 @@ const PixsoFig3 = () => {
   const menuItems = [
     { key: 'home', icon: <HomeOutlined />, label: 'Home' },
     { key: 'explore', icon: <CompassOutlined />, label: 'Explore' },
-    { key: 'library', icon: <LibraryOutlined />, label: 'Library' },
-    { key: 'settings', icon: <SettingsOutlined />, label: 'Settings' },
+    { key: 'library', icon: <BookOutlined />, label: 'Library' },
+    { key: 'settings', icon: <SettingOutlined />, label: 'Settings' },
   ];
 
   return (
