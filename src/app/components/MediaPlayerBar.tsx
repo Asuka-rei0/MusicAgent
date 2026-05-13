@@ -1,12 +1,17 @@
 import { useState } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Volume2, Heart, Sparkles } from 'lucide-react';
 import Slider from '@mui/material/Slider';
+import { usePlayer } from '../contexts/PlayerContext';
 
 export default function MediaPlayerBar() {
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(35);
-  const [volume, setVolume] = useState(70);
+  const { isPlaying, setIsPlaying, progress, setProgress, volume, setVolume, currentTime, duration } = usePlayer();
   const [isLiked, setIsLiked] = useState(false);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   return (
     <div className="h-24 bg-gradient-to-r from-[#1a1a2e]/95 to-[#12121a]/95 border-t border-white/10 backdrop-blur-2xl px-6 flex items-center gap-6 text-white">
@@ -56,7 +61,7 @@ export default function MediaPlayerBar() {
 
         {/* Progress Bar */}
         <div className="w-full max-w-2xl flex items-center gap-3">
-          <span className="text-xs text-gray-400 w-10 text-right">2:15</span>
+          <span className="text-xs text-gray-400 w-10 text-right">{formatTime(currentTime)}</span>
           <Slider
             value={progress}
             onChange={(_, value) => setProgress(value as number)}
@@ -72,7 +77,7 @@ export default function MediaPlayerBar() {
               },
             }}
           />
-          <span className="text-xs text-gray-400 w-10">6:30</span>
+          <span className="text-xs text-gray-400 w-10">{formatTime(duration)}</span>
         </div>
       </div>
 

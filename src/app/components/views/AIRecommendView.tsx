@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Bot, User, Send } from 'lucide-react';
+import { usePlayer } from '../../contexts/PlayerContext';
 
 interface Message {
   id: string;
@@ -12,10 +13,10 @@ interface Message {
 interface LyricLine {
   text: string;
   time: number;
-  isActive: boolean;
 }
 
 export default function AIRecommendView() {
+  const { currentTime } = usePlayer();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
@@ -32,22 +33,56 @@ export default function AIRecommendView() {
   ]);
 
   const [inputValue, setInputValue] = useState('');
-  const [currentTime, setCurrentTime] = useState(35);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lyricsContainerRef = useRef<HTMLDivElement>(null);
+  const activeLyricRef = useRef<HTMLDivElement>(null);
 
   const lyrics: LyricLine[] = [
-    { text: 'Under the moonlight so serene', time: 0, isActive: false },
-    { text: 'The gentle keys are playing...', time: 30, isActive: true },
-    { text: 'Saxophone whispers through the night', time: 60, isActive: false },
-    { text: 'A melody so enchanting', time: 90, isActive: false },
-    { text: 'Stars are dancing in the sky', time: 120, isActive: false },
+    { text: 'In the beginning there was silence', time: 0 },
+    { text: 'Then came the sound of distant notes', time: 20 },
+    { text: 'Piano keys dancing in the dark', time: 40 },
+    { text: 'Under the moonlight so serene', time: 60 },
+    { text: 'The gentle keys are playing...', time: 80 },
+    { text: 'Melodies float through the air', time: 100 },
+    { text: 'Saxophone whispers through the night', time: 120 },
+    { text: 'A melody so enchanting', time: 140 },
+    { text: 'Hearts begin to sway and move', time: 160 },
+    { text: 'Stars are dancing in the sky', time: 180 },
+    { text: 'Jazz fills the midnight hour', time: 200 },
+    { text: 'Smooth rhythms carry us away', time: 220 },
+    { text: 'In this moment we are free', time: 240 },
+    { text: 'Lost in the music forever', time: 260 },
+    { text: 'Until the dawn breaks again', time: 280 },
   ];
 
-  const activeLyricIndex = lyrics.findIndex((lyric) => lyric.time <= currentTime && (lyrics[lyrics.indexOf(lyric) + 1]?.time || Infinity) > currentTime);
+  const activeLyricIndex = lyrics.findIndex((lyric, index) => {
+    const nextLyric = lyrics[index + 1];
+    return currentTime >= lyric.time && (!nextLyric || currentTime < nextLyric.time);
+  });
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Auto-scroll lyrics to active line
+  useEffect(() => {
+    if (activeLyricRef.current && lyricsContainerRef.current) {
+      const container = lyricsContainerRef.current;
+      const activeLine = activeLyricRef.current;
+
+      const containerHeight = container.clientHeight;
+      const lineOffsetTop = activeLine.offsetTop;
+      const lineHeight = activeLine.clientHeight;
+
+      // Scroll so active lyric is centered
+      const scrollTo = lineOffsetTop - containerHeight / 2 + lineHeight / 2;
+
+      container.scrollTo({
+        top: scrollTo,
+        behavior: 'smooth',
+      });
+    }
+  }, [activeLyricIndex]);
 
   const handleSendMessage = () => {
     if (!inputValue.trim()) return;
@@ -170,16 +205,21 @@ export default function AIRecommendView() {
       <div className="w-96 bg-gradient-to-br from-[#1a1a2e]/80 to-[#12121a]/80 backdrop-blur-xl rounded-2xl border border-white/10 p-6 flex flex-col">
         <h3 className="text-lg font-semibold mb-6">Lyrics</h3>
 
-        <div className="flex-1 flex flex-col justify-center items-center gap-6 overflow-auto">
+        <div
+          ref={lyricsContainerRef}
+          className="flex-1 flex flex-col justify-start items-center gap-8 overflow-auto py-32"
+          style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+        >
           {lyrics.map((lyric, index) => (
             <motion.div
               key={index}
+              ref={index === activeLyricIndex ? activeLyricRef : null}
               animate={{
-                scale: index === activeLyricIndex ? 1.2 : 0.9,
-                opacity: index === activeLyricIndex ? 1 : 0.4,
+                scale: index === activeLyricIndex ? 1.15 : 0.85,
+                opacity: index === activeLyricIndex ? 1 : 0.35,
               }}
-              transition={{ duration: 0.3 }}
-              className={`text-center transition-all ${
+              transition={{ duration: 0.4, ease: 'easeInOut' }}
+              className={`text-center transition-all whitespace-nowrap ${
                 index === activeLyricIndex
                   ? 'text-2xl font-semibold bg-gradient-to-r from-purple-400 to-pink-600 bg-clip-text text-transparent'
                   : 'text-base text-gray-400'
@@ -189,6 +229,11 @@ export default function AIRecommendView() {
             </motion.div>
           ))}
         </div>
+        <style jsx>{`
+          div::-webkit-scrollbar {
+            display: none;
+          }
+        `}</style>
 
         <div className="mt-6 pt-6 border-t border-white/10">
           <div className="text-sm text-gray-500 text-center">
