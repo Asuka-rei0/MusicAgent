@@ -1,0 +1,167 @@
+.pixso-fig4 {
+  height: 100vh;
+  background: linear-gradient(135deg, #0d0d1a 0%, #111128 50%, #0a0a18 100%);
+}
+
+.pixso-fig4 .sidebar {
+  background: rgba(255, 255, 255, 0.04);
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pixso-fig4 .sidebar-header {
+  padding: 24px;
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pixso-fig4 .logo {
+  font-size: 48px;
+  color: #7c3aed;
+  font-weight: bold;
+}
+
+.pixso-fig4 .sidebar-menu .ant-menu-item {
+  margin: 8px 16px;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.pixso-fig4 .sidebar-menu .ant-menu-item-selected {
+  background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+  color: white;
+}
+
+.pixso-fig4 .sidebar-menu .ant-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.pixso-fig4 .sidebar-menu .anticon {
+  font-size: 20px;
+}
+
+.pixso-fig4 .main-content {
+  padding: 32px;
+  overflow-y: auto;
+}
+
+.pixso-fig4 .content-header {
+  margin-bottom: 32px;
+}
+
+.pixso-fig4 .page-title {
+  color: white !important;
+  margin: 0 !important;
+}
+
+.pixso-fig4 .settings-content {
+  max-width: 800px;
+}
+
+.pixso-fig4 .settings-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  backdrop-filter: blur(10px);
+}
+
+.pixso-fig4 .settings-card .ant-card-body {
+  padding: 32px;
+}
+
+.pixso-fig4 .setting-section {
+  margin-bottom: 24px;
+}
+
+.pixso-fig4 .section-header {
+  margin-bottom: 24px;
+}
+
+.pixso-fig4 .section-header h4 {
+  color: white !important;
+  margin-bottom: 8px !important;
+}
+
+.pixso-fig4 .section-header .ant-typography-secondary {
+  color: rgba(255, 255, 255, 0.6) !important;
+}
+
+.pixso-fig4 .theme-options {
+  margin-top: 16px;
+}
+
+.pixso-fig4 .theme-radio-group .ant-radio-wrapper {
+  margin-right: 0;
+  width: 100%;
+}
+
+.pixso-fig4 .theme-option {
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  transition: all 0.3s;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.pixso-fig4 .theme-option:hover {
+  border-color: rgba(124, 58, 237, 0.5);
+  background: rgba(124, 58, 237, 0.05);
+}
+
+.pixso-fig4 .theme-radio-group .ant-radio-wrapper-checked .theme-option {
+  border-color: #7c3aed;
+  background: rgba(124, 58, 237, 0.1);
+}
+
+.pixso-fig4 .theme-radio .ant-radio {
+  display: none;
+}
+
+.pixso-fig4 .theme-radio .ant-radio + * {
+  padding: 0;
+}
+
+.pixso-fig4 .lyrics-toggle {
+  display: flex;
+  align-items: center;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+}
+
+.pixso-fig4 .lyrics-switch .ant-switch {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.pixso-fig4 .lyrics-switch .ant-switch-checked {
+  background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+}
+
+.pixso-fig4 .lyrics-toggle .ant-typography {
+  color: white;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .pixso-fig4 .sidebar {
+    width: 80px !important;
+  }
+
+  .pixso-fig4 .sidebar-menu .ant-menu-item {
+    padding: 0 16px;
+    text-align: center;
+  }
+
+  .pixso-fig4 .sidebar-menu .ant-menu-title-content {
+    display: none;
+  }
+
+  .pixso-fig4 .main-content {
+    padding: 16px;
+  }
+
+  .pixso-fig4 .settings-card .ant-card-body {
+    padding: 24px;
+  }
+}

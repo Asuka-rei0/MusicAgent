@@ -1,0 +1,191 @@
+.pixso-fig3 {
+  height: 100vh;
+  background: linear-gradient(135deg, #0d0d1a 0%, #111128 50%, #0a0a18 100%);
+}
+
+.pixso-fig3 .sidebar {
+  background: rgba(255, 255, 255, 0.04);
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pixso-fig3 .sidebar-header {
+  padding: 24px;
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pixso-fig3 .logo {
+  font-size: 48px;
+  color: #7c3aed;
+  font-weight: bold;
+}
+
+.pixso-fig3 .sidebar-menu .ant-menu-item {
+  margin: 8px 16px;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.pixso-fig3 .sidebar-menu .ant-menu-item-selected {
+  background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+  color: white;
+}
+
+.pixso-fig3 .sidebar-menu .ant-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.pixso-fig3 .sidebar-menu .anticon {
+  font-size: 20px;
+}
+
+.pixso-fig3 .main-content {
+  padding: 32px;
+  overflow-y: auto;
+}
+
+.pixso-fig3 .content-header {
+  margin-bottom: 32px;
+}
+
+.pixso-fig3 .page-title {
+  color: white !important;
+  margin: 0 !important;
+}
+
+.pixso-fig3 .search-section {
+  margin-bottom: 32px;
+}
+
+.pixso-fig3 .search-input .ant-input {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: white;
+  border-radius: 24px;
+}
+
+.pixso-fig3 .search-input .ant-input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.pixso-fig3 .search-input .ant-btn {
+  background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+  border: none;
+  border-radius: 24px;
+}
+
+.pixso-fig3 .content-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.pixso-fig3 .weekly-report-card,
+.pixso-fig3 .recent-plays-card,
+.pixso-fig3 .playlists-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  backdrop-filter: blur(10px);
+}
+
+.pixso-fig3 .weekly-report-card .ant-card-head,
+.pixso-fig3 .recent-plays-card .ant-card-head,
+.pixso-fig3 .playlists-card .ant-card-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pixso-fig3 .weekly-report-card .ant-card-head-title,
+.pixso-fig3 .recent-plays-card .ant-card-head-title,
+.pixso-fig3 .playlists-card .ant-card-head-title {
+  color: white;
+}
+
+.pixso-fig3 .card-header {
+  margin-bottom: 16px;
+}
+
+.pixso-fig3 .report-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pixso-fig3 .stat-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pixso-fig3 .stat-item:last-child {
+  border-bottom: none;
+}
+
+.pixso-fig3 .track-item,
+.pixso-fig3 .playlist-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  transition: background-color 0.3s;
+}
+
+.pixso-fig3 .track-item:hover,
+.pixso-fig3 .playlist-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.pixso-fig3 .track-info,
+.pixso-fig3 .playlist-info {
+  flex: 1;
+}
+
+.pixso-fig3 .track-info strong,
+.pixso-fig3 .playlist-info strong {
+  color: white;
+  display: block;
+}
+
+.pixso-fig3 .track-info span,
+.pixso-fig3 .playlist-info span {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 14px;
+}
+
+/* Responsive design */
+@media (max-width: 1200px) {
+  .pixso-fig3 .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pixso-fig3 .main-content {
+    padding: 24px;
+  }
+}
+
+@media (max-width: 768px) {
+  .pixso-fig3 .sidebar {
+    width: 80px !important;
+  }
+
+  .pixso-fig3 .sidebar-menu .ant-menu-item {
+    padding: 0 16px;
+    text-align: center;
+  }
+
+  .pixso-fig3 .sidebar-menu .ant-menu-title-content {
+    display: none;
+  }
+
+  .pixso-fig3 .main-content {
+    padding: 16px;
+  }
+
+  .pixso-fig3 .content-grid {
+    gap: 16px;
+  }
+}
