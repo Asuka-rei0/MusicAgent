@@ -8,6 +8,7 @@ const App = (() => {
     let currentFilePath = '';
     let currentTrackTitle = 'Midnight Jazz';
     let currentTrackArtist = 'Smooth Jazz Ensemble';
+    let playbackStrategy = 'normal';
     let isLiked = false;
     let messages = [
         { id: '1', type: 'user', content: 'Feeling tired, need something soothing...', timestamp: new Date(Date.now() - 120000) },
@@ -20,6 +21,7 @@ const App = (() => {
     let localPaths = [];
     let settings = { theme: 'dark', autoPlay: true, desktopLyrics: false, colorFollowAlbum: true };
     let selectedPlaylist = null;
+    let hasAutoScannedLocalPaths = false;
     let lyrics = [
         { text: 'In the beginning there was silence', time: 0 },
         { text: 'Then came the sound of distant notes', time: 20 },
@@ -46,54 +48,79 @@ const App = (() => {
     ];
 
     function init() {
-        window.addEventListener('message', handleWebMessage);
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', handleWebMessage);
+        } else {
+            window.addEventListener('message', handleWebMessage);
+        }
         loadInitialData();
         render();
         startProgressTimer();
     }
 
     function handleWebMessage(event) {
-        const response = JSON.parse(event.data);
+        const response = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        const action = response.action || response.Action;
+        const data = response.data ?? response.Data;
         console.log('Received from C#:', response);
         
-        switch (response.action) {
+        switch (action) {
+            case 'error':
+                alert(`后端处理失败：${data}`);
+                break;
             case 'getPlaylists':
-                playlists = JSON.parse(response.data);
+                playlists = JSON.parse(data).map(normalizePlaylist);
                 if (playlists.length > 0 && !selectedPlaylist) selectedPlaylist = playlists[0];
                 render();
                 break;
             case 'getTracks':
-                tracks = JSON.parse(response.data);
+                tracks = JSON.parse(data).map(normalizeTrack);
                 render();
                 break;
             case 'getWeeklyData':
-                weeklyData = JSON.parse(response.data);
+                weeklyData = JSON.parse(data);
                 render();
                 break;
             case 'getPlatformData':
-                platformData = JSON.parse(response.data);
+                platformData = JSON.parse(data);
                 render();
                 break;
             case 'getLocalPaths':
-                localPaths = JSON.parse(response.data);
+                localPaths = normalizeLocalPaths(JSON.parse(data));
+                if (localPaths.length > 0) {
+                    selectedPlaylist = getLibraryPlaylists()[0];
+                }
+                autoScanLocalPaths();
+                render();
+                break;
+            case 'addLocalPath':
+                applyAddLocalPathResponse(data);
+                render();
+                break;
+            case 'removeLocalPath':
+                applyRemoveLocalPathResponse(data);
                 render();
                 break;
             case 'getSettings':
-                settings = JSON.parse(response.data);
+                settings = JSON.parse(data);
                 render();
                 break;
             case 'scanFolder':
-                applyScanFolderResponse(response.data);
+                applyScanFolderResponse(data);
                 render();
                 break;
             case 'play':
             case 'pause':
             case 'resume':
+            case 'next':
+            case 'previous':
+            case 'setQueue':
+            case 'setPlaybackStrategy':
             case 'setProgress':
             case 'setVolume':
             case 'getAudioState':
             case 'getProgress':
-                applyAudioState(response.data);
+                applyAudioState(data);
                 renderPlayer();
                 break;
         }
@@ -109,6 +136,9 @@ const App = (() => {
         volume = Number(progressData.volume ?? volume) || volume;
         isPlaying = Boolean(progressData.isPlaying);
         currentFilePath = progressData.filePath || currentFilePath;
+        currentTrackTitle = progressData.title || getFileNameWithoutExtension(currentFilePath) || currentTrackTitle;
+        currentTrackArtist = progressData.artist || currentTrackArtist || 'Unknown Artist';
+        playbackStrategy = progressData.playbackStrategy || playbackStrategy;
 
         if (progressData.errorMessage) {
             console.warn('AudioCore error:', progressData.errorMessage);
@@ -117,16 +147,129 @@ const App = (() => {
 
     function applyScanFolderResponse(data) {
         const scanData = parseJsonData(data);
-        if (!scanData || !Array.isArray(scanData.files)) return;
+        if (!scanData || !Array.isArray(scanData.files)) {
+            alert(`扫描失败：${data}`);
+            return;
+        }
 
-        tracks = scanData.files.map((filePath, index) => ({
+        const scannedTracks = scanData.files.map((filePath, index) => ({
             id: `local-${index}`,
             title: getFileNameWithoutExtension(filePath),
-            artist: 'Local file',
+            artist: 'Unknown Artist',
             album: getParentFolderName(filePath),
             duration: '--:--',
             filePath
         }));
+        const existingPaths = new Set(tracks.map(track => track.filePath));
+        scannedTracks.forEach(track => {
+            if (!existingPaths.has(track.filePath)) {
+                tracks.push(track);
+            }
+        });
+
+        if (scannedTracks.length === 0) {
+            alert('扫描完成，但这个文件夹里没有找到支持的音频文件。');
+        }
+    }
+
+    function applyAddLocalPathResponse(data) {
+        const pathData = parseJsonData(data);
+        const pathValue = pathData?.path || pathData?.Path;
+        if (!pathData || typeof pathData !== 'object' || !pathValue) {
+            console.warn('Add local path failed:', data);
+            alert(`添加路径失败：${data}`);
+            return;
+        }
+
+        const normalizedPath = {
+            id: pathData.id || pathData.Id,
+            path: pathValue,
+            trackCount: pathData.trackCount ?? pathData.TrackCount ?? 0
+        };
+
+        const existingIndex = localPaths.findIndex(path => path.id === normalizedPath.id || path.path === normalizedPath.path);
+        if (existingIndex >= 0) {
+            localPaths[existingIndex] = normalizedPath;
+        } else {
+            localPaths.push(normalizedPath);
+        }
+
+        alert(`已添加曲库路径，开始扫描：${normalizedPath.path}`);
+        sendToCSharp('scanFolder', JSON.stringify({ Path: normalizedPath.path }));
+    }
+
+    function normalizeLocalPaths(paths) {
+        if (!Array.isArray(paths)) return [];
+
+        return paths.map(path => ({
+            id: path.id || path.Id,
+            path: path.path || path.Path,
+            trackCount: path.trackCount ?? path.TrackCount ?? 0
+        }));
+    }
+
+    function normalizePlaylist(playlist) {
+        return {
+            id: playlist.id ?? playlist.Id,
+            name: playlist.name ?? playlist.Name ?? 'Untitled Playlist',
+            tracks: playlist.tracks ?? playlist.Tracks ?? 0,
+            duration: playlist.duration ?? playlist.Duration ?? '--',
+            cover: playlist.cover ?? playlist.Cover ?? getDefaultCover()
+        };
+    }
+
+    function getLibraryPlaylists() {
+        return localPaths.map((path, index) => ({
+            id: `local-path-${path.id || index}`,
+            sourceIndex: index,
+            isLocal: true,
+            name: getFolderDisplayName(path.path),
+            tracks: path.trackCount ?? 0,
+            duration: 'Local Library',
+            cover: getDefaultCover(),
+            path: path.path
+        }));
+    }
+
+    function normalizeTrack(track) {
+        return {
+            id: track.id ?? track.Id,
+            title: track.title ?? track.Title ?? getFileNameWithoutExtension(track.filePath || track.sourceUri || ''),
+            artist: track.artist ?? track.Artist ?? 'Unknown Artist',
+            album: track.album ?? track.Album ?? 'Local Music',
+            duration: track.duration ?? track.Duration ?? '--:--',
+            filePath: track.filePath ?? track.FilePath ?? track.sourceUri ?? track.SourceUri ?? ''
+        };
+    }
+
+    function getDefaultCover() {
+        return 'https://images.unsplash.com/photo-1511379938547-c1f69419868d?w=200&h=200&fit=crop';
+    }
+
+    function getFolderDisplayName(path) {
+        if (!path) return 'Local Music';
+        const parts = path.split(/[\\/]/).filter(Boolean);
+        return parts.length > 0 ? parts[parts.length - 1] : path;
+    }
+
+    function autoScanLocalPaths() {
+        if (hasAutoScannedLocalPaths || localPaths.length === 0) return;
+
+        hasAutoScannedLocalPaths = true;
+        localPaths.forEach(path => {
+            if (path.path) {
+                sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
+            }
+        });
+    }
+
+    function applyRemoveLocalPathResponse(data) {
+        if (typeof data === 'string' && data !== 'Removed') {
+            console.warn('Remove local path failed:', data);
+            return;
+        }
+
+        sendToCSharp('getLocalPaths');
     }
 
     function parseJsonData(data) {
@@ -189,6 +332,63 @@ const App = (() => {
         isPlaying = true;
         sendToCSharp('play', JSON.stringify({ filePath }));
         renderPlayer();
+    }
+
+    function toQueueTrack(track, index) {
+        const sourceUri = track.filePath || track.sourceUri || '';
+        return {
+            id: String(track.id || sourceUri || `track-${index}`),
+            title: track.title || getFileNameWithoutExtension(sourceUri),
+            artist: track.artist || 'Unknown Artist',
+            sourceUri,
+            durationMs: track.durationMs || null
+        };
+    }
+
+    function getPlayableQueue() {
+        return tracks
+            .map(toQueueTrack)
+            .filter(track => Boolean(track.sourceUri));
+    }
+
+    function playTrackFromQueue(index) {
+        const queue = getPlayableQueue();
+        const selected = tracks[index];
+        if (!selected) return;
+
+        if (queue.length > 0 && (selected.filePath || selected.sourceUri)) {
+            const selectedSource = selected.filePath || selected.sourceUri;
+            const startIndex = Math.max(0, queue.findIndex(track => track.sourceUri === selectedSource));
+            const track = queue[startIndex];
+
+            currentFilePath = track.sourceUri;
+            currentTrackTitle = track.title;
+            currentTrackArtist = track.artist;
+            isPlaying = true;
+
+            sendToCSharp('setQueue', JSON.stringify({ tracks: queue, startIndex }));
+            sendToCSharp('play', JSON.stringify({ filePath: track.sourceUri }));
+            renderPlayer();
+            return;
+        }
+
+        promptAndPlayFile();
+    }
+
+    function cyclePlaybackStrategy() {
+        playbackStrategy = playbackStrategy === 'normal'
+            ? 'shuffle'
+            : playbackStrategy === 'shuffle'
+                ? 'repeat'
+                : 'normal';
+        sendToCSharp('setPlaybackStrategy', JSON.stringify({ strategy: playbackStrategy }));
+        renderPlayer();
+    }
+
+    function getPlaybackStrategyLabel() {
+        if (playbackStrategy === 'shuffle') return '随机';
+        if (playbackStrategy === 'repeat') return '循环';
+        return '顺序';
     }
 
     function promptAndPlayFile() {
@@ -390,6 +590,11 @@ const App = (() => {
     function renderLibrary() {
         const maxHours = Math.max(...weeklyData.map(d => d.hours), 1);
         const totalHours = platformData.reduce((sum, p) => sum + p.value, 0);
+        const libraryPlaylists = getLibraryPlaylists();
+        const trackListTitle = selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks';
+        const visibleTracks = selectedPlaylist?.isLocal
+            ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
+            : tracks;
         return `
             <div class="space-y-6">
                 <div class="grid grid-cols-2 gap-6">
@@ -429,34 +634,34 @@ const App = (() => {
                     </div>
                 </div>
                 <div class="card">
-                    <h3 class="text-xl font-semibold mb-6">My Playlists</h3>
+                    <h3 class="text-xl font-semibold mb-6">Local Libraries</h3>
                     <div class="grid grid-cols-5 gap-4">
-                        ${playlists.map(playlist => `
-                            <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" data-playlist-id="${playlist.id}">
+                        ${libraryPlaylists.map(playlist => `
+                            <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" data-local-playlist-index="${playlist.sourceIndex}">
                                 <div class="aspect-square rounded-lg overflow-hidden mb-3">
-                                    <img src="${playlist.cover}" alt="${playlist.name}" class="w-full h-full object-cover">
+                        <img src="${playlist.cover || getDefaultCover()}" alt="${playlist.name || 'Playlist'}" class="w-full h-full object-cover">
                                 </div>
-                                <h4 class="font-medium text-sm truncate">${playlist.name}</h4>
-                                <p class="text-xs text-gray-400">${playlist.tracks} tracks • ${playlist.duration}</p>
+                                <h4 class="font-medium text-sm truncate">${playlist.name || 'Untitled Playlist'}</h4>
+                                <p class="text-xs text-gray-400">${playlist.tracks ?? 0} tracks • ${playlist.duration || '--'}</p>
                             </div>
                         `).join('')}
                     </div>
                 </div>
                 <div class="card">
-                    <h3 class="text-xl font-semibold mb-6">${selectedPlaylist ? selectedPlaylist.name : 'Tracks'}</h3>
+                    <h3 class="text-xl font-semibold mb-6">${trackListTitle}</h3>
                     <div class="space-y-2">
-                        ${tracks.map((track, index) => `
-                            <div class="track-row group" data-track-index="${index}">
+                        ${visibleTracks.map((track, index) => `
+                            <div class="track-row group" data-track-index="${tracks.indexOf(track)}">
                                 <div class="w-8 text-gray-400 text-sm">${index + 1}</div>
                                 <div class="track-play">
                                     <svg class="w-4 h-4 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                                 </div>
                                 <div class="flex-1 min-w-0">
-                                    <div class="font-medium truncate">${track.title}</div>
-                                    <div class="text-sm text-gray-400 truncate">${track.artist}</div>
+                                    <div class="font-medium truncate">${track.title || 'Untitled Track'}</div>
+                                    <div class="text-sm text-gray-400 truncate">${track.artist || 'Unknown Artist'}</div>
                                 </div>
-                                <div class="text-sm text-gray-400">${track.album}</div>
-                                <div class="text-sm text-gray-400 w-16 text-right">${track.duration}</div>
+                                <div class="text-sm text-gray-400">${track.album || 'Local Music'}</div>
+                                <div class="text-sm text-gray-400 w-16 text-right">${track.duration || '--:--'}</div>
                             </div>
                         `).join('')}
                     </div>
@@ -587,11 +792,11 @@ const App = (() => {
             <div class="player-bar px-6 flex items-center gap-6 text-white">
                 <div class="flex items-center gap-4 w-80">
                     <div class="w-16 h-16 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center overflow-hidden">
-                        <img src="https://images.unsplash.com/photo-1511379938547-c1f69419868d?w=200&h=200&fit=crop" alt="Album" class="w-full h-full object-cover">
+                        <img src="${getDefaultCover()}" alt="Album" class="w-full h-full object-cover">
                     </div>
                     <div class="flex-1 min-w-0">
-                        <div class="font-medium truncate">${currentTrackTitle}</div>
-                        <div class="text-sm text-gray-400 truncate">${currentTrackArtist}</div>
+                        <div class="font-medium truncate">${currentTrackTitle || 'No track selected'}</div>
+                        <div class="text-sm text-gray-400 truncate">${currentTrackArtist || 'Unknown Artist'}</div>
                     </div>
                     <button id="like-btn" class="p-2 hover:bg-white/5 rounded-full transition-colors">
                         <svg class="w-5 h-5 ${isLiked ? 'fill-red-500 text-red-500' : 'text-gray-400'}" fill="${isLiked ? 'currentColor' : 'none'}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
@@ -599,7 +804,7 @@ const App = (() => {
                 </div>
                 <div class="flex-1 flex flex-col items-center gap-2">
                     <div class="flex items-center gap-4">
-                        <button class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white">
+                        <button id="previous-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="上一首">
                             <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
                         </button>
                         <button id="play-pause-btn" class="play-button">
@@ -608,7 +813,7 @@ const App = (() => {
                                 '<svg class="w-6 h-6 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'
                             }
                         </button>
-                        <button class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white">
+                        <button id="next-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="下一首">
                             <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
                         </button>
                     </div>
@@ -619,8 +824,9 @@ const App = (() => {
                     </div>
                 </div>
                 <div class="flex items-center gap-4 w-80 justify-end">
-                    <button class="p-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30">
+                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="播放模式">
                         <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
+                        <span>${getPlaybackStrategyLabel()}</span>
                     </button>
                     <div class="flex items-center gap-2">
                         <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
@@ -656,26 +862,23 @@ const App = (() => {
             });
         }
 
-        document.querySelectorAll('[data-playlist-id]').forEach(el => {
+        document.querySelectorAll('[data-local-playlist-index]').forEach(el => {
             el.addEventListener('click', () => {
-                const id = parseInt(el.dataset.playlistId);
-                selectedPlaylist = playlists.find(p => p.id === id);
-                sendToCSharp('getTracks', id.toString());
+                const index = Number(el.dataset.localPlaylistIndex);
+                const playlist = getLibraryPlaylists()[index];
+                if (!playlist) return;
+
+                selectedPlaylist = playlist;
+                if (!tracks.some(track => track.filePath && track.filePath.startsWith(playlist.path))) {
+                    sendToCSharp('scanFolder', JSON.stringify({ Path: playlist.path }));
+                }
                 render();
             });
         });
 
         document.querySelectorAll('[data-track-index]').forEach(el => {
             el.addEventListener('click', () => {
-                const track = tracks[Number(el.dataset.trackIndex)];
-                if (!track) return;
-
-                if (track.filePath) {
-                    playFile(track.filePath, track.title, track.artist);
-                    return;
-                }
-
-                promptAndPlayFile();
+                playTrackFromQueue(Number(el.dataset.trackIndex));
             });
         });
 
@@ -715,8 +918,9 @@ const App = (() => {
         if (addPathBtn) {
             addPathBtn.addEventListener('click', () => {
                 const path = prompt('请输入音乐文件夹路径:');
-                if (path) {
-                    sendToCSharp('addLocalPath', JSON.stringify({ path }));
+                const normalizedPath = path ? path.trim() : '';
+                if (normalizedPath) {
+                    sendToCSharp('addLocalPath', JSON.stringify({ Path: normalizedPath }));
                 }
             });
         }
@@ -731,7 +935,7 @@ const App = (() => {
         if (rescanBtn) {
             rescanBtn.addEventListener('click', () => {
                 localPaths.forEach(path => {
-                    sendToCSharp('scanFolder', JSON.stringify({ path: path.path }));
+                    sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
                 });
             });
         }
@@ -749,11 +953,32 @@ const App = (() => {
                 } else if (currentFilePath) {
                     isPlaying = true;
                     sendToCSharp('resume');
+                } else if (getPlayableQueue().length > 0) {
+                    playTrackFromQueue(0);
                 } else {
                     promptAndPlayFile();
                 }
                 renderPlayer();
             });
+        }
+
+        const previousBtn = document.getElementById('previous-btn');
+        if (previousBtn) {
+            previousBtn.addEventListener('click', () => {
+                sendToCSharp('previous');
+            });
+        }
+
+        const nextBtn = document.getElementById('next-btn');
+        if (nextBtn) {
+            nextBtn.addEventListener('click', () => {
+                sendToCSharp('next');
+            });
+        }
+
+        const strategyBtn = document.getElementById('strategy-btn');
+        if (strategyBtn) {
+            strategyBtn.addEventListener('click', cyclePlaybackStrategy);
         }
 
         const progressSlider = document.getElementById('progress-slider');

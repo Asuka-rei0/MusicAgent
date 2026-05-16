@@ -6,6 +6,7 @@ namespace MusicAgentWinForms;
 public class FileService
 {
     private readonly string _configPath;
+    private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
     private List<LocalPathEntry> _localPaths;
 
     public FileService()
@@ -18,7 +19,7 @@ public class FileService
     {
         try
         {
-            var request = JsonSerializer.Deserialize<ScanRequest>(data);
+            var request = JsonSerializer.Deserialize<ScanRequest>(data, _jsonOptions);
             if (request == null || string.IsNullOrEmpty(request.Path) || !Directory.Exists(request.Path))
             {
                 return new WebMessageResponse { Action = "scanFolder", Data = "Invalid folder path" };
@@ -66,7 +67,7 @@ public class FileService
     {
         try
         {
-            var request = JsonSerializer.Deserialize<LocalPathEntry>(data);
+            var request = JsonSerializer.Deserialize<LocalPathEntry>(data, _jsonOptions);
             if (request == null || string.IsNullOrEmpty(request.Path))
             {
                 return new WebMessageResponse { Action = "addLocalPath", Data = "Invalid path" };
@@ -156,7 +157,7 @@ public class FileService
         if (File.Exists(_configPath))
         {
             var json = File.ReadAllText(_configPath);
-            return JsonSerializer.Deserialize<List<LocalPathEntry>>(json) ?? new List<LocalPathEntry>();
+            return JsonSerializer.Deserialize<List<LocalPathEntry>>(json, _jsonOptions) ?? new List<LocalPathEntry>();
         }
         return new List<LocalPathEntry>
         {

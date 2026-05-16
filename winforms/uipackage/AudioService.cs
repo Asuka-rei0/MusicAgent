@@ -1,5 +1,6 @@
 using AAudioCore.Models;
 using AAudioCore.Services;
+using AAudioCore.Strategies;
 using System.Text.Json;
 
 namespace MusicAgentWinForms;
@@ -7,37 +8,51 @@ namespace MusicAgentWinForms;
 public class AudioService
 {
     private readonly NAudioAudioService audioCore = new();
+    private readonly JsonSerializerOptions jsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private string playbackStrategy = "normal";
     private string? currentFilePath;
 
     public WebMessageResponse Play(string data)
     {
         try
         {
-            var request = JsonSerializer.Deserialize<PlayRequest>(data);
+            var request = JsonSerializer.Deserialize<PlayRequest>(data, jsonOptions);
             if (request == null || string.IsNullOrEmpty(request.FilePath))
             {
-                return new WebMessageResponse { Action = "play", Data = "Invalid file path" };
+                return CreateStateResponse("play", "Invalid file path.");
             }
 
             if (!File.Exists(request.FilePath))
             {
-                return new WebMessageResponse { Action = "play", Data = "File not found" };
+                return CreateStateResponse("play", "File not found.");
             }
 
             currentFilePath = request.FilePath;
-            audioCore.LoadMedia(request.FilePath, request.FilePath);
-            audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Play));
-            var state = audioCore.GetState();
 
-            return new WebMessageResponse
+            if (audioCore.GetQueue().Count == 0)
             {
-                Action = "play",
-                Data = JsonSerializer.Serialize(ToProgressPayload(state))
-            };
+                audioCore.SetQueue(new[]
+                {
+                    new PlaybackTrack
+                    {
+                        Id = request.FilePath,
+                        SourceUri = request.FilePath,
+                        Title = Path.GetFileNameWithoutExtension(request.FilePath),
+                        Artist = "Local file"
+                    }
+                });
+            }
+            else if (audioCore.GetState().SourceUri != request.FilePath)
+            {
+                audioCore.LoadMedia(request.FilePath, request.FilePath);
+            }
+
+            audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Play));
+            return CreateStateResponse("play");
         }
         catch (Exception ex)
         {
-            return new WebMessageResponse { Action = "play", Data = $"Error: {ex.Message}" };
+            return CreateStateResponse("play", ex.Message);
         }
     }
 
@@ -46,15 +61,11 @@ public class AudioService
         try
         {
             audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Pause));
-            return new WebMessageResponse
-            {
-                Action = "pause",
-                Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState()))
-            };
+            return CreateStateResponse("pause");
         }
         catch (Exception ex)
         {
-            return new WebMessageResponse { Action = "pause", Data = $"Error: {ex.Message}" };
+            return CreateStateResponse("pause", ex.Message);
         }
     }
 
@@ -63,15 +74,11 @@ public class AudioService
         try
         {
             audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Play));
-            return new WebMessageResponse
-            {
-                Action = "resume",
-                Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState()))
-            };
+            return CreateStateResponse("resume");
         }
         catch (Exception ex)
         {
-            return new WebMessageResponse { Action = "resume", Data = $"Error: {ex.Message}" };
+            return CreateStateResponse("resume", ex.Message);
         }
     }
 
@@ -79,11 +86,105 @@ public class AudioService
     {
         audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Stop));
         currentFilePath = null;
-        return new WebMessageResponse
+        return CreateStateResponse("stop");
+    }
+
+    public WebMessageResponse Next()
+    {
+        try
         {
-            Action = "stop",
-            Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState()))
-        };
+            audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Next));
+            currentFilePath = audioCore.GetState().SourceUri;
+            return CreateStateResponse("next");
+        }
+        catch (Exception ex)
+        {
+            return CreateStateResponse("next", ex.Message);
+        }
+    }
+
+    public WebMessageResponse Previous()
+    {
+        try
+        {
+            audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Previous));
+            currentFilePath = audioCore.GetState().SourceUri;
+            return CreateStateResponse("previous");
+        }
+        catch (Exception ex)
+        {
+            return CreateStateResponse("previous", ex.Message);
+        }
+    }
+
+    public WebMessageResponse SetQueue(string data)
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<SetQueueRequest>(data, jsonOptions);
+            var tracks = request?.Tracks?
+                .Where(track => !string.IsNullOrWhiteSpace(track.SourceUri) && File.Exists(track.SourceUri))
+                .Select((track, index) => new PlaybackTrack
+                {
+                    Id = string.IsNullOrWhiteSpace(track.Id) ? track.SourceUri : track.Id,
+                    SourceUri = track.SourceUri,
+                    Title = track.Title,
+                    Artist = track.Artist,
+                    DurationMs = track.DurationMs
+                })
+                .ToList() ?? new List<PlaybackTrack>();
+
+            if (tracks.Count == 0)
+            {
+                return CreateStateResponse("setQueue", "No playable local files in the queue.");
+            }
+
+            var startIndex = Math.Clamp(request?.StartIndex ?? 0, 0, tracks.Count - 1);
+            audioCore.ExecuteCommand(new PlayCommand
+            {
+                Type = PlayCommandType.SetQueue,
+                Queue = tracks,
+                StartIndex = startIndex
+            });
+
+            currentFilePath = audioCore.GetState().SourceUri;
+            return CreateStateResponse("setQueue");
+        }
+        catch (Exception ex)
+        {
+            return CreateStateResponse("setQueue", ex.Message);
+        }
+    }
+
+    public WebMessageResponse SetPlaybackStrategy(string data)
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<PlaybackStrategyRequest>(data, jsonOptions);
+            playbackStrategy = (request?.Strategy ?? data ?? "normal").Trim().Trim('"').ToLowerInvariant();
+
+            audioCore.ExecuteCommand(new PlayCommand
+            {
+                Type = PlayCommandType.SetPlaybackStrategy,
+                Strategy = playbackStrategy switch
+                {
+                    "shuffle" => new ShuffleStrategy(),
+                    "repeat" => new RepeatStrategy(),
+                    _ => new NormalStrategy()
+                }
+            });
+
+            if (playbackStrategy is not ("shuffle" or "repeat"))
+            {
+                playbackStrategy = "normal";
+            }
+
+            return CreateStateResponse("setPlaybackStrategy");
+        }
+        catch (Exception ex)
+        {
+            return CreateStateResponse("setPlaybackStrategy", ex.Message);
+        }
     }
 
     public WebMessageResponse SetVolume(string data)
@@ -98,17 +199,13 @@ public class AudioService
                     Volume = Math.Clamp(volume / 100f, 0f, 1f)
                 });
 
-                return new WebMessageResponse
-                {
-                    Action = "setVolume",
-                    Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState()))
-                };
+                return CreateStateResponse("setVolume");
             }
-            return new WebMessageResponse { Action = "setVolume", Data = "Invalid volume value" };
+            return CreateStateResponse("setVolume", "Invalid volume value.");
         }
         catch (Exception ex)
         {
-            return new WebMessageResponse { Action = "setVolume", Data = $"Error: {ex.Message}" };
+            return CreateStateResponse("setVolume", ex.Message);
         }
     }
 
@@ -121,17 +218,13 @@ public class AudioService
             {
                 var newPositionMs = state.DurationMs * (Math.Clamp(percent, 0, 100) / 100.0);
                 audioCore.SeekToPosition(newPositionMs);
-                return new WebMessageResponse
-                {
-                    Action = "setProgress",
-                    Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState()))
-                };
+                return CreateStateResponse("setProgress");
             }
-            return new WebMessageResponse { Action = "setProgress", Data = "Invalid progress" };
+            return CreateStateResponse("setProgress", "Invalid progress.");
         }
         catch (Exception ex)
         {
-            return new WebMessageResponse { Action = "setProgress", Data = $"Error: {ex.Message}" };
+            return CreateStateResponse("setProgress", ex.Message);
         }
     }
 
@@ -140,44 +233,55 @@ public class AudioService
         try
         {
             audioCore.RefreshState();
-            return new WebMessageResponse
-            {
-                Action = "getProgress",
-                Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState()))
-            };
+            currentFilePath = audioCore.GetState().SourceUri;
+            return CreateStateResponse("getProgress");
         }
         catch (Exception ex)
         {
-            return new WebMessageResponse { Action = "getProgress", Data = $"Error: {ex.Message}" };
+            return CreateStateResponse("getProgress", ex.Message);
         }
     }
 
     public WebMessageResponse GetState()
     {
         audioCore.RefreshState();
+        currentFilePath = audioCore.GetState().SourceUri;
+        return CreateStateResponse("getAudioState");
+    }
+
+    private WebMessageResponse CreateStateResponse(string action, string? errorMessage = null)
+    {
         return new WebMessageResponse
         {
-            Action = "getAudioState",
-            Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState()))
+            Action = action,
+            Data = JsonSerializer.Serialize(ToProgressPayload(audioCore.GetState(), errorMessage))
         };
     }
 
-    private object ToProgressPayload(AudioState state)
+    private object ToProgressPayload(AudioState state, string? errorMessage = null)
     {
         var progress = state.DurationMs > 0 ? state.CurrentMs / state.DurationMs * 100 : 0;
+        var queue = audioCore.GetQueue();
+        var currentTrack = queue.FirstOrDefault(track => track.Id == state.TrackId)
+            ?? queue.FirstOrDefault(track => track.SourceUri == state.SourceUri);
 
         return new
         {
-            filePath = currentFilePath,
+            filePath = state.SourceUri ?? currentFilePath,
             trackId = state.TrackId,
             sourceUri = state.SourceUri,
+            title = currentTrack?.Title,
+            artist = currentTrack?.Artist,
             status = state.Status.ToString(),
             progress,
             currentTime = state.CurrentMs / 1000,
             duration = state.DurationMs / 1000,
             volume = Math.Round(state.Volume * 100),
             isPlaying = state.Status == PlaybackStatus.Playing,
-            errorMessage = state.ErrorMessage
+            currentIndex = audioCore.GetCurrentIndex(),
+            queueCount = queue.Count,
+            playbackStrategy,
+            errorMessage = errorMessage ?? state.ErrorMessage
         };
     }
 }
@@ -185,4 +289,24 @@ public class AudioService
 public class PlayRequest
 {
     public string FilePath { get; set; } = string.Empty;
+}
+
+public class SetQueueRequest
+{
+    public List<QueueTrackRequest> Tracks { get; set; } = new();
+    public int StartIndex { get; set; }
+}
+
+public class QueueTrackRequest
+{
+    public string Id { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string Artist { get; set; } = string.Empty;
+    public string SourceUri { get; set; } = string.Empty;
+    public double? DurationMs { get; set; }
+}
+
+public class PlaybackStrategyRequest
+{
+    public string Strategy { get; set; } = "normal";
 }

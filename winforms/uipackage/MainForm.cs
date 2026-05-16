@@ -10,6 +10,7 @@ public class MainForm : Form
     private AudioService audioService = null!;
     private DatabaseService dbService = null!;
     private FileService fileService = null!;
+    private readonly JsonSerializerOptions jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public MainForm()
     {
@@ -61,7 +62,7 @@ public class MainForm : Form
         try
         {
             var message = e.TryGetWebMessageAsString();
-            var request = JsonSerializer.Deserialize<WebMessageRequest>(message);
+            var request = JsonSerializer.Deserialize<WebMessageRequest>(message, jsonOptions);
             if (request == null) return;
 
             var response = HandleRequest(request);
@@ -88,6 +89,10 @@ public class MainForm : Form
             "pause" => audioService.Pause(),
             "resume" => audioService.Resume(),
             "stop" => audioService.Stop(),
+            "next" => audioService.Next(),
+            "previous" => audioService.Previous(),
+            "setQueue" => audioService.SetQueue(request.Data),
+            "setPlaybackStrategy" => audioService.SetPlaybackStrategy(request.Data),
             "setVolume" => audioService.SetVolume(request.Data),
             "setProgress" => audioService.SetProgress(request.Data),
             "getProgress" => audioService.GetProgress(),
@@ -120,4 +125,6 @@ public class WebMessageResponse
     public string Id { get; set; } = string.Empty;
     public string Action { get; set; } = string.Empty;
     public object Data { get; set; } = string.Empty;
+    public string action => Action;
+    public object data => Data;
 }
