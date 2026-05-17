@@ -16,7 +16,30 @@ public class DatabaseService
             .Options;
         _context = new MusicDbContext(options);
         _context.Database.EnsureCreated();
+        EnsureListeningHistoryTable();
+        DeleteOldListeningHistory();
         SeedData();
+    }
+
+    private void EnsureListeningHistoryTable()
+    {
+        _context.Database.ExecuteSqlRaw("""
+            CREATE TABLE IF NOT EXISTS ListeningHistory (
+                Id INTEGER NOT NULL CONSTRAINT PK_ListeningHistory PRIMARY KEY AUTOINCREMENT,
+                TrackPath TEXT NOT NULL,
+                Platform TEXT NOT NULL,
+                ListenedAt TEXT NOT NULL,
+                DurationSeconds REAL NOT NULL
+            );
+            """);
+    }
+
+    private void DeleteOldListeningHistory()
+    {
+        var cutoff = DateTime.Today.AddDays(-6);
+        _context.ListeningHistory
+            .Where(item => item.ListenedAt < cutoff)
+            .ExecuteDelete();
     }
 
     private void SeedData()
@@ -59,10 +82,10 @@ public class DatabaseService
         if (!_context.PlatformData.Any())
         {
             _context.PlatformData.AddRange(
-                new PlatformData { Name = "Spotify", Value = 18, Color = "#1DB954" },
+                new PlatformData { Name = "Spotify", Value = 18, Color = "#F97316" },
                 new PlatformData { Name = "NetEase", Value = 12, Color = "#D33A31" },
-                new PlatformData { Name = "Apple Music", Value = 8, Color = "#FA243C" },
-                new PlatformData { Name = "YouTube", Value = 4, Color = "#FF0000" }
+                new PlatformData { Name = "Apple Music", Value = 8, Color = "#EAB308" },
+                new PlatformData { Name = "QQ Music", Value = 4, Color = "#22C55E" }
             );
         }
 
@@ -153,14 +176,84 @@ public class DatabaseService
 
     public WebMessageResponse GetWeeklyData()
     {
-        var data = _context.WeeklyData.ToList();
+        var since = DateTime.Today.AddDays(-6);
+        var history = _context.ListeningHistory
+            .Where(item => item.ListenedAt >= since)
+            .ToList();
+
+        var data = Enumerable.Range(0, 7)
+            .Select(offset =>
+            {
+                var date = since.AddDays(offset);
+                var seconds = history
+                    .Where(item => item.ListenedAt.Date == date.Date)
+                    .Sum(item => item.DurationSeconds);
+
+                return new WeeklyListeningData
+                {
+                    Day = date.ToString("ddd"),
+                    Hours = Math.Round(seconds / 3600.0, 2)
+                };
+            })
+            .ToList();
+
         return new WebMessageResponse { Action = "getWeeklyData", Data = JsonSerializer.Serialize(data) };
     }
 
     public WebMessageResponse GetPlatformData()
     {
-        var data = _context.PlatformData.ToList();
+        var data = _context.ListeningHistory
+            .GroupBy(item => item.Platform)
+            .Select(group => new PlatformListeningData
+            {
+                Name = group.Key,
+                Value = Math.Round(group.Sum(item => item.DurationSeconds) / 3600.0, 2),
+                Color = GetPlatformColor(group.Key)
+            })
+            .Where(item => item.Value > 0)
+            .ToList();
+
         return new WebMessageResponse { Action = "getPlatformData", Data = JsonSerializer.Serialize(data) };
+    }
+
+    public WebMessageResponse RecordListeningTime(string data)
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<ListeningTimeRequest>(data, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (request == null || string.IsNullOrWhiteSpace(request.TrackPath) || request.DurationSeconds <= 0)
+            {
+                return new WebMessageResponse { Action = "recordListeningTime", Data = "Invalid listening data" };
+            }
+
+            _context.ListeningHistory.Add(new ListeningHistory
+            {
+                TrackPath = request.TrackPath,
+                Platform = string.IsNullOrWhiteSpace(request.Platform) ? "Local" : request.Platform,
+                ListenedAt = DateTime.Now,
+                DurationSeconds = Math.Min(request.DurationSeconds, 300)
+            });
+            DeleteOldListeningHistory();
+            _context.SaveChanges();
+
+            return new WebMessageResponse { Action = "recordListeningTime", Data = "Saved" };
+        }
+        catch (Exception ex)
+        {
+            return new WebMessageResponse { Action = "recordListeningTime", Data = $"Error: {ex.Message}" };
+        }
+    }
+
+    private static string GetPlatformColor(string platform)
+    {
+        return platform.ToLowerInvariant() switch
+        {
+            "spotify" => "#F97316",
+            "netease" => "#D33A31",
+            "apple music" => "#EAB308",
+            "qq music" => "#22C55E",
+            _ => "#8B5CF6"
+        };
     }
 }
 
@@ -174,6 +267,7 @@ public class MusicDbContext : DbContext
     public DbSet<PlatformData> PlatformData { get; set; }
     public DbSet<AppSettings> Settings { get; set; }
     public DbSet<LocalPath> LocalPaths { get; set; }
+    public DbSet<ListeningHistory> ListeningHistory { get; set; }
 }
 
 public class Playlist
@@ -212,6 +306,36 @@ public class PlatformData
     public string Name { get; set; } = string.Empty;
     public int Value { get; set; }
     public string Color { get; set; } = string.Empty;
+}
+
+public class WeeklyListeningData
+{
+    public string Day { get; set; } = string.Empty;
+    public double Hours { get; set; }
+}
+
+public class PlatformListeningData
+{
+    public string Name { get; set; } = string.Empty;
+    public double Value { get; set; }
+    public string Color { get; set; } = string.Empty;
+}
+
+public class ListeningHistory
+{
+    [Key]
+    public int Id { get; set; }
+    public string TrackPath { get; set; } = string.Empty;
+    public string Platform { get; set; } = "Local";
+    public DateTime ListenedAt { get; set; }
+    public double DurationSeconds { get; set; }
+}
+
+public class ListeningTimeRequest
+{
+    public string TrackPath { get; set; } = string.Empty;
+    public string Platform { get; set; } = "Local";
+    public double DurationSeconds { get; set; }
 }
 
 public class AppSettings

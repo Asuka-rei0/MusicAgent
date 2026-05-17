@@ -101,6 +101,7 @@ public class MainForm : Form
             "getLocalPaths" => fileService.GetLocalPaths(),
             "addLocalPath" => fileService.AddLocalPath(request.Data),
             "removeLocalPath" => fileService.RemoveLocalPath(request.Data),
+            "getLyrics" => fileService.GetLyrics(request.Data),
             "getPlaylists" => dbService.GetPlaylists(),
             "getTracks" => dbService.GetTracks(request.Data),
             "savePlaylist" => dbService.SavePlaylist(request.Data),
@@ -108,6 +109,7 @@ public class MainForm : Form
             "saveSettings" => dbService.SaveSettings(request.Data),
             "getWeeklyData" => dbService.GetWeeklyData(),
             "getPlatformData" => dbService.GetPlatformData(),
+            "recordListeningTime" => dbService.RecordListeningTime(request.Data),
             _ => new WebMessageResponse { Id = request.Id, Action = request.Action, Data = "Unknown action" }
         };
     }

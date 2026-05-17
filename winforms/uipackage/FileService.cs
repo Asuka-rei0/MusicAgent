@@ -26,10 +26,11 @@ public class FileService
             }
 
             var musicFiles = ScanForMusicFiles(request.Path);
+            var tracks = musicFiles.Select(ReadTrackMetadata).ToList();
             var entry = _localPaths.FirstOrDefault(p => p.Path == request.Path);
             if (entry != null)
             {
-                entry.TrackCount = musicFiles.Count;
+                entry.TrackCount = tracks.Count;
             }
             else
             {
@@ -37,7 +38,7 @@ public class FileService
                 {
                     Id = DateTime.Now.Ticks.ToString(),
                     Path = request.Path,
-                    TrackCount = musicFiles.Count
+                    TrackCount = tracks.Count
                 });
             }
             SaveLocalPaths();
@@ -45,7 +46,7 @@ public class FileService
             return new WebMessageResponse
             {
                 Action = "scanFolder",
-                Data = JsonSerializer.Serialize(new { files = musicFiles, count = musicFiles.Count })
+                Data = JsonSerializer.Serialize(new { path = request.Path, files = musicFiles, tracks, count = tracks.Count })
             };
         }
         catch (Exception ex)
@@ -120,6 +121,48 @@ public class FileService
         }
     }
 
+    public WebMessageResponse GetLyrics(string data)
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<LyricRequest>(data, _jsonOptions);
+            if (request == null || string.IsNullOrWhiteSpace(request.FilePath))
+            {
+                return CreateLyricsResponse(false, string.Empty, string.Empty, string.Empty, "Invalid file path.");
+            }
+
+            var audioPath = request.FilePath;
+            var lyricPath = Path.ChangeExtension(audioPath, ".lrc");
+            if (string.IsNullOrWhiteSpace(lyricPath) || !File.Exists(lyricPath))
+            {
+                return CreateLyricsResponse(false, audioPath, lyricPath ?? string.Empty, string.Empty, "No matching .lrc file found.");
+            }
+
+            var content = File.ReadAllText(lyricPath);
+            return CreateLyricsResponse(true, audioPath, lyricPath, content);
+        }
+        catch (Exception ex)
+        {
+            return CreateLyricsResponse(false, string.Empty, string.Empty, string.Empty, ex.Message);
+        }
+    }
+
+    private static WebMessageResponse CreateLyricsResponse(bool found, string filePath, string lyricPath, string content, string? errorMessage = null)
+    {
+        return new WebMessageResponse
+        {
+            Action = "getLyrics",
+            Data = JsonSerializer.Serialize(new
+            {
+                found,
+                filePath,
+                lyricPath,
+                content,
+                errorMessage
+            })
+        };
+    }
+
     private List<string> ScanForMusicFiles(string folderPath)
     {
         var musicExtensions = new[] { ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma" };
@@ -152,6 +195,65 @@ public class FileService
         return files;
     }
 
+    private static LocalTrackInfo ReadTrackMetadata(string filePath)
+    {
+        var fallbackTitle = Path.GetFileNameWithoutExtension(filePath);
+        var fallbackAlbum = GetParentFolderName(filePath);
+
+        try
+        {
+            using var file = TagLib.File.Create(filePath);
+            var title = string.IsNullOrWhiteSpace(file.Tag.Title) ? fallbackTitle : file.Tag.Title;
+            var artist = GetFirstNonEmpty(file.Tag.Performers)
+                ?? GetFirstNonEmpty(file.Tag.AlbumArtists)
+                ?? "Unknown Artist";
+            var album = string.IsNullOrWhiteSpace(file.Tag.Album) ? fallbackAlbum : file.Tag.Album;
+            var duration = file.Properties.Duration;
+
+            return new LocalTrackInfo
+            {
+                Id = $"local-{filePath}",
+                FilePath = filePath,
+                Title = title,
+                Artist = artist,
+                Album = album,
+                Duration = FormatDuration(duration),
+                DurationMs = duration.TotalMilliseconds
+            };
+        }
+        catch
+        {
+            return new LocalTrackInfo
+            {
+                Id = $"local-{filePath}",
+                FilePath = filePath,
+                Title = fallbackTitle,
+                Artist = "Unknown Artist",
+                Album = fallbackAlbum,
+                Duration = "--:--",
+                DurationMs = null
+            };
+        }
+    }
+
+    private static string? GetFirstNonEmpty(IEnumerable<string>? values)
+    {
+        return values?.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+    }
+
+    private static string GetParentFolderName(string filePath)
+    {
+        return Directory.GetParent(filePath)?.Name ?? "Local Music";
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        if (duration <= TimeSpan.Zero) return "--:--";
+        return duration.TotalHours >= 1
+            ? $"{(int)duration.TotalHours}:{duration.Minutes:00}:{duration.Seconds:00}"
+            : $"{(int)duration.TotalMinutes}:{duration.Seconds:00}";
+    }
+
     private List<LocalPathEntry> LoadLocalPaths()
     {
         if (File.Exists(_configPath))
@@ -159,11 +261,7 @@ public class FileService
             var json = File.ReadAllText(_configPath);
             return JsonSerializer.Deserialize<List<LocalPathEntry>>(json, _jsonOptions) ?? new List<LocalPathEntry>();
         }
-        return new List<LocalPathEntry>
-        {
-            new LocalPathEntry { Id = "1", Path = @"C:\Users\Music", TrackCount = 1245 },
-            new LocalPathEntry { Id = "2", Path = @"D:\Downloads\Music", TrackCount = 367 }
-        };
+        return new List<LocalPathEntry>();
     }
 
     private void SaveLocalPaths()
@@ -183,4 +281,20 @@ public class LocalPathEntry
 public class ScanRequest
 {
     public string Path { get; set; } = string.Empty;
+}
+
+public class LyricRequest
+{
+    public string FilePath { get; set; } = string.Empty;
+}
+
+public class LocalTrackInfo
+{
+    public string Id { get; set; } = string.Empty;
+    public string FilePath { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string Artist { get; set; } = string.Empty;
+    public string Album { get; set; } = string.Empty;
+    public string Duration { get; set; } = "--:--";
+    public double? DurationMs { get; set; }
 }

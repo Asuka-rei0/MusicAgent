@@ -6,8 +6,8 @@ const App = (() => {
     let currentTime = 0;
     let duration = 0;
     let currentFilePath = '';
-    let currentTrackTitle = 'Midnight Jazz';
-    let currentTrackArtist = 'Smooth Jazz Ensemble';
+    let currentTrackTitle = '未知歌曲';
+    let currentTrackArtist = '未知艺术家';
     let playbackStrategy = 'normal';
     let isLiked = false;
     let messages = [
@@ -22,23 +22,14 @@ const App = (() => {
     let settings = { theme: 'dark', autoPlay: true, desktopLyrics: false, colorFollowAlbum: true };
     let selectedPlaylist = null;
     let hasAutoScannedLocalPaths = false;
-    let lyrics = [
-        { text: 'In the beginning there was silence', time: 0 },
-        { text: 'Then came the sound of distant notes', time: 20 },
-        { text: 'Piano keys dancing in the dark', time: 40 },
-        { text: 'Under the moonlight so serene', time: 60 },
-        { text: 'The gentle keys are playing...', time: 80 },
-        { text: 'Melodies float through the air', time: 100 },
-        { text: 'Saxophone whispers through the night', time: 120 },
-        { text: 'A melody so enchanting', time: 140 },
-        { text: 'Hearts begin to sway and move', time: 160 },
-        { text: 'Stars are dancing in the sky', time: 180 },
-        { text: 'Jazz fills the midnight hour', time: 200 },
-        { text: 'Smooth rhythms carry us away', time: 220 },
-        { text: 'In this moment we are free', time: 240 },
-        { text: 'Lost in the music forever', time: 260 },
-        { text: 'Until the dawn breaks again', time: 280 }
-    ];
+    let isScanningLocalPaths = false;
+    let loadedLyricsFilePath = '';
+    let lastActiveLyricIndex = -1;
+    let listeningBufferSeconds = 0;
+    let lastProgressFilePath = '';
+    let lastProgressTime = 0;
+    let lastProgressWasPlaying = false;
+    let lyrics = [{ text: 'No lyrics loaded', time: 0 }];
 
     const navItems = [
         { path: 'ai-recommend', label: 'AI Recommend', icon: 'sparkles' },
@@ -78,11 +69,18 @@ const App = (() => {
                 render();
                 break;
             case 'getWeeklyData':
-                weeklyData = JSON.parse(data);
+                weeklyData = JSON.parse(data).map(item => ({
+                    day: item.day ?? item.Day,
+                    hours: Number(item.hours ?? item.Hours ?? 0)
+                }));
                 render();
                 break;
             case 'getPlatformData':
-                platformData = JSON.parse(data);
+                platformData = JSON.parse(data).map(item => ({
+                    name: item.name ?? item.Name,
+                    value: Number(item.value ?? item.Value ?? 0),
+                    color: item.color ?? item.Color ?? '#8B5CF6'
+                }));
                 render();
                 break;
             case 'getLocalPaths':
@@ -109,6 +107,10 @@ const App = (() => {
                 applyScanFolderResponse(data);
                 render();
                 break;
+            case 'getLyrics':
+                applyLyricsResponse(data);
+                renderLyricsPanel();
+                break;
             case 'play':
             case 'pause':
             case 'resume':
@@ -123,12 +125,20 @@ const App = (() => {
                 applyAudioState(data);
                 renderPlayer();
                 break;
+            case 'recordListeningTime':
+                sendToCSharp('getWeeklyData');
+                sendToCSharp('getPlatformData');
+                break;
         }
     }
 
     function applyAudioState(data) {
         const progressData = parseJsonData(data);
         if (!progressData || typeof progressData !== 'object') return;
+
+        const previousFilePath = currentFilePath;
+        const nextFilePath = progressData.filePath || currentFilePath;
+        updateListeningStats(nextFilePath, Number(progressData.currentTime ?? currentTime) || 0, Boolean(progressData.isPlaying));
 
         progress = Number(progressData.progress ?? progress) || 0;
         currentTime = Number(progressData.currentTime ?? currentTime) || 0;
@@ -143,29 +153,56 @@ const App = (() => {
         if (progressData.errorMessage) {
             console.warn('AudioCore error:', progressData.errorMessage);
         }
+
+        if (currentFilePath && currentFilePath !== previousFilePath) {
+            requestLyricsForFile(currentFilePath);
+        }
+
+        syncLyricHighlight();
     }
 
     function applyScanFolderResponse(data) {
         const scanData = parseJsonData(data);
         if (!scanData || !Array.isArray(scanData.files)) {
+            isScanningLocalPaths = false;
             alert(`扫描失败：${data}`);
             return;
         }
 
-        const scannedTracks = scanData.files.map((filePath, index) => ({
-            id: `local-${index}`,
-            title: getFileNameWithoutExtension(filePath),
-            artist: 'Unknown Artist',
-            album: getParentFolderName(filePath),
-            duration: '--:--',
-            filePath
-        }));
+        const scannedPath = scanData.path || scanData.Path || '';
+        const scannedTracks = Array.isArray(scanData.tracks || scanData.Tracks)
+            ? (scanData.tracks || scanData.Tracks).map(normalizeTrack)
+            : scanData.files.map((filePath) => ({
+                id: `local-${filePath}`,
+                title: getFileNameWithoutExtension(filePath),
+                artist: 'Unknown Artist',
+                album: getParentFolderName(filePath),
+                duration: '--:--',
+                durationMs: null,
+                filePath
+            }));
+
+        if (scannedPath) {
+            tracks = tracks.filter(track => !(track.filePath && track.filePath.startsWith(scannedPath)));
+            const pathIndex = localPaths.findIndex(path => path.path === scannedPath);
+            if (pathIndex >= 0) {
+                localPaths[pathIndex] = {
+                    ...localPaths[pathIndex],
+                    trackCount: scanData.count ?? scannedTracks.length
+                };
+                if (selectedPlaylist?.isLocal && selectedPlaylist.path === scannedPath) {
+                    selectedPlaylist = getLibraryPlaylists()[pathIndex];
+                }
+            }
+        }
+
         const existingPaths = new Set(tracks.map(track => track.filePath));
         scannedTracks.forEach(track => {
             if (!existingPaths.has(track.filePath)) {
                 tracks.push(track);
             }
         });
+        isScanningLocalPaths = false;
 
         if (scannedTracks.length === 0) {
             alert('扫描完成，但这个文件夹里没有找到支持的音频文件。');
@@ -195,6 +232,8 @@ const App = (() => {
         }
 
         alert(`已添加曲库路径，开始扫描：${normalizedPath.path}`);
+        selectedPlaylist = getLibraryPlaylists().find(playlist => playlist.path === normalizedPath.path) || selectedPlaylist;
+        isScanningLocalPaths = true;
         sendToCSharp('scanFolder', JSON.stringify({ Path: normalizedPath.path }));
     }
 
@@ -238,6 +277,7 @@ const App = (() => {
             artist: track.artist ?? track.Artist ?? 'Unknown Artist',
             album: track.album ?? track.Album ?? 'Local Music',
             duration: track.duration ?? track.Duration ?? '--:--',
+            durationMs: track.durationMs ?? track.DurationMs ?? null,
             filePath: track.filePath ?? track.FilePath ?? track.sourceUri ?? track.SourceUri ?? ''
         };
     }
@@ -256,6 +296,14 @@ const App = (() => {
         if (hasAutoScannedLocalPaths || localPaths.length === 0) return;
 
         hasAutoScannedLocalPaths = true;
+        scanAllLocalPaths();
+    }
+
+    function scanAllLocalPaths() {
+        if (localPaths.length === 0) return;
+
+        isScanningLocalPaths = true;
+        render();
         localPaths.forEach(path => {
             if (path.path) {
                 sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
@@ -279,6 +327,97 @@ const App = (() => {
         } catch {
             return null;
         }
+    }
+
+    function requestLyricsForFile(filePath) {
+        if (!filePath || loadedLyricsFilePath === filePath) return;
+
+        loadedLyricsFilePath = filePath;
+        lastActiveLyricIndex = -1;
+        lyrics = [{ text: 'Loading lyrics...', time: 0 }];
+        sendToCSharp('getLyrics', JSON.stringify({ filePath }));
+    }
+
+    function applyLyricsResponse(data) {
+        const lyricData = parseJsonData(data);
+        if (lyricData?.filePath && lyricData.filePath !== currentFilePath) {
+            return;
+        }
+
+        if (!lyricData || !lyricData.found || !lyricData.content) {
+            lyrics = [{ text: 'No lyrics found', time: 0 }];
+            lastActiveLyricIndex = -1;
+            return;
+        }
+
+        const parsedLyrics = parseLrc(lyricData.content);
+        lyrics = parsedLyrics.length > 0 ? parsedLyrics : [{ text: 'No timed lyrics found', time: 0 }];
+        lastActiveLyricIndex = -1;
+    }
+
+    function updateListeningStats(filePath, nextTime, nextIsPlaying) {
+        if (lastProgressWasPlaying && filePath && filePath === lastProgressFilePath) {
+            const delta = nextTime - lastProgressTime;
+            if (delta > 0 && delta <= 10) {
+                listeningBufferSeconds += delta;
+            }
+        }
+
+        if (filePath !== lastProgressFilePath || !nextIsPlaying || listeningBufferSeconds >= 15) {
+            flushListeningStats(filePath || lastProgressFilePath);
+        }
+
+        lastProgressFilePath = filePath;
+        lastProgressTime = nextTime;
+        lastProgressWasPlaying = nextIsPlaying;
+    }
+
+    function flushListeningStats(filePath = currentFilePath) {
+        if (!filePath || listeningBufferSeconds < 1) return;
+
+        sendToCSharp('recordListeningTime', JSON.stringify({
+            trackPath: filePath,
+            platform: getTrackPlatform(filePath),
+            durationSeconds: listeningBufferSeconds
+        }));
+        listeningBufferSeconds = 0;
+    }
+
+    function getTrackPlatform(filePath) {
+        return filePath ? 'Local' : 'Unknown';
+    }
+
+    function parseLrc(content) {
+        const timeTagPattern = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+        const parsed = [];
+
+        content.split(/\r?\n/).forEach(line => {
+            const text = line.replace(timeTagPattern, '').trim();
+            if (!text) return;
+
+            const tags = [...line.matchAll(timeTagPattern)];
+            tags.forEach(tag => {
+                const minutes = Number(tag[1]);
+                const seconds = Number(tag[2]);
+                const fraction = tag[3] || '0';
+                const milliseconds = Number(fraction.padEnd(3, '0').slice(0, 3));
+                parsed.push({
+                    time: minutes * 60 + seconds + milliseconds / 1000,
+                    text
+                });
+            });
+        });
+
+        return parsed.sort((a, b) => a.time - b.time);
+    }
+
+    function escapeHtml(value) {
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     function sendToCSharp(action, data = '') {
@@ -330,6 +469,7 @@ const App = (() => {
         currentTrackTitle = title;
         currentTrackArtist = artist;
         isPlaying = true;
+        requestLyricsForFile(filePath);
         sendToCSharp('play', JSON.stringify({ filePath }));
         renderPlayer();
     }
@@ -366,6 +506,7 @@ const App = (() => {
             currentTrackArtist = track.artist;
             isPlaying = true;
 
+            requestLyricsForFile(track.sourceUri);
             sendToCSharp('setQueue', JSON.stringify({ tracks: queue, startIndex }));
             sendToCSharp('play', JSON.stringify({ filePath: track.sourceUri }));
             renderPlayer();
@@ -403,6 +544,71 @@ const App = (() => {
             const nextLyric = lyrics[index + 1];
             return currentTime >= lyric.time && (!nextLyric || currentTime < nextLyric.time);
         });
+    }
+
+    function buildDonutGradient(data) {
+        const total = data.reduce((sum, item) => sum + Number(item.value || 0), 0);
+        if (total <= 0) return 'conic-gradient(#4b5563 0deg 360deg)';
+
+        let start = 0;
+        const segments = data.map(item => {
+            const value = Number(item.value || 0);
+            const end = start + (value / total) * 360;
+            const segment = `${item.color || '#8B5CF6'} ${start.toFixed(2)}deg ${end.toFixed(2)}deg`;
+            start = end;
+            return segment;
+        });
+
+        return `conic-gradient(${segments.join(', ')})`;
+    }
+
+    function getWeeklyBarHeight(hours, maxHours) {
+        const value = Number(hours || 0);
+        if (value <= 0) return 0;
+
+        return Math.max((value / maxHours) * 100, 8);
+    }
+
+    function renderLyricsPanel() {
+        const lyricsPanel = document.getElementById('lyrics-panel');
+        if (lyricsPanel) {
+            lyricsPanel.outerHTML = renderLyricsContent();
+            requestAnimationFrame(syncLyricHighlight);
+        }
+    }
+
+    function syncLyricHighlight() {
+        const activeLyricIndex = getActiveLyricIndex();
+        if (activeLyricIndex === lastActiveLyricIndex) return;
+
+        lastActiveLyricIndex = activeLyricIndex;
+        document.querySelectorAll('[data-lyric-index]').forEach(line => {
+            const isActive = Number(line.dataset.lyricIndex) === activeLyricIndex;
+            line.classList.toggle('lyric-active', isActive);
+            line.classList.toggle('lyric-inactive', !isActive);
+        });
+
+        const container = document.getElementById('lyrics-panel');
+        const activeLine = document.querySelector(`[data-lyric-index="${activeLyricIndex}"]`);
+        if (!container || !activeLine) return;
+
+        container.scrollTo({
+            top: activeLine.offsetTop - container.clientHeight / 2 + activeLine.clientHeight / 2,
+            behavior: 'smooth'
+        });
+    }
+
+    function renderLyricsContent() {
+        const activeLyricIndex = getActiveLyricIndex();
+        return `
+            <div id="lyrics-panel" class="flex-1 overflow-auto" style="scrollbar-width: none;">
+                <div class="flex flex-col items-center gap-6 py-16">
+                    ${lyrics.map((lyric, index) => `
+                        <div class="lyric-line ${index === activeLyricIndex ? 'lyric-active' : 'lyric-inactive'}" data-lyric-index="${index}">${escapeHtml(lyric.text)}</div>
+                    `).join('')}
+                </div>
+            </div>
+        `;
     }
 
     function render() {
@@ -469,7 +675,6 @@ const App = (() => {
     }
 
     function renderAIRecommend() {
-        const activeLyricIndex = getActiveLyricIndex();
         return `
             <div class="h-full flex gap-6 overflow-hidden">
                 <div class="flex-1 flex flex-col gap-6">
@@ -514,13 +719,7 @@ const App = (() => {
                 </div>
                 <div class="w-96 card flex flex-col">
                     <h3 class="text-lg font-semibold mb-6">Lyrics</h3>
-                    <div class="flex-1 overflow-auto" style="scrollbar-width: none;">
-                        <div class="flex flex-col items-center gap-6 py-16">
-                            ${lyrics.map((lyric, index) => `
-                                <div class="lyric-line ${index === activeLyricIndex ? 'lyric-active' : 'lyric-inactive'}">${lyric.text}</div>
-                            `).join('')}
-                        </div>
-                    </div>
+                    ${renderLyricsContent()}
                     <div class="mt-6 pt-6 border-t border-white/10 text-sm text-gray-500 text-center">
                         Playing from <span class="text-purple-400">AI Recommendations</span>
                     </div>
@@ -539,10 +738,10 @@ const App = (() => {
             { name: 'Energize', gradient: 'from-yellow-500 to-orange-500' }
         ];
         const charts = [
-            { platform: 'Spotify', color: 'from-green-500 to-emerald-600', tracks: ['Blinding Lights', 'Save Your Tears', 'Levitating'] },
+            { platform: 'Spotify', color: 'from-orange-500 to-amber-500', tracks: ['Blinding Lights', 'Save Your Tears', 'Levitating'] },
             { platform: 'NetEase Cloud', color: 'from-red-500 to-rose-600', tracks: ['晴天', '七里香', '稻香'] },
-            { platform: 'Apple Music', color: 'from-pink-500 to-rose-600', tracks: ['As It Was', 'Anti-Hero', 'Flowers'] },
-            { platform: 'YouTube Music', color: 'from-red-600 to-orange-600', tracks: ['Heat Waves', 'Shivers', 'Stay'] }
+            { platform: 'Apple Music', color: 'from-yellow-400 to-amber-500', tracks: ['As It Was', 'Anti-Hero', 'Flowers'] },
+            { platform: 'QQ Music', color: 'from-emerald-500 to-teal-500', tracks: ['年少有为', '起风了', '光年之外'] }
         ];
         return `
             <div class="space-y-8">
@@ -589,12 +788,22 @@ const App = (() => {
 
     function renderLibrary() {
         const maxHours = Math.max(...weeklyData.map(d => d.hours), 1);
-        const totalHours = platformData.reduce((sum, p) => sum + p.value, 0);
+        const totalHours = platformData.reduce((sum, p) => sum + Number(p.value || 0), 0);
+        const weekTotalHours = weeklyData.reduce((sum, d) => sum + Number(d.hours || 0), 0);
+        const donutGradient = buildDonutGradient(platformData);
         const libraryPlaylists = getLibraryPlaylists();
+        const hasLocalLibraries = libraryPlaylists.length > 0;
         const trackListTitle = selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks';
         const visibleTracks = selectedPlaylist?.isLocal
             ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
             : tracks;
+        const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
+            ? '正在读取已有歌单歌曲...'
+            : '暂无歌曲';
+        const emptyTrackHint = hasLocalLibraries
+            ? '点击重新扫描已保存的曲库路径'
+            : '点击后可以手动填写一个音频文件路径播放';
+
         return `
             <div class="space-y-6">
                 <div class="grid grid-cols-2 gap-6">
@@ -602,25 +811,27 @@ const App = (() => {
                         <h3 class="text-xl font-semibold mb-6">Weekly Report</h3>
                         <div class="flex items-end gap-3 h-48">
                             ${weeklyData.map(d => `
-                                <div class="flex-1 flex flex-col items-center gap-2">
-                                    <div class="w-full bg-purple-500/30 rounded-t-lg chart-bar" style="height: ${(d.hours / maxHours) * 100}%"></div>
+                                <div class="flex-1 h-full flex flex-col items-center justify-end gap-2">
+                                    <div class="w-full bg-purple-500/50 rounded-t-lg chart-bar" style="height: ${getWeeklyBarHeight(d.hours, maxHours)}%"></div>
                                     <span class="text-xs text-gray-400">${d.day}</span>
                                 </div>
                             `).join('')}
                         </div>
-                        <div class="mt-4 text-sm text-gray-400">Total: <span class="text-white font-semibold">37.8 hours</span> this week</div>
+                        <div class="mt-4 text-sm text-gray-400">Total: <span class="text-white font-semibold">${weekTotalHours.toFixed(1)} hours</span> this week</div>
                     </div>
                     <div class="card">
                         <h3 class="text-xl font-semibold mb-6">Listening Time</h3>
                         <div class="flex items-center justify-between">
-                            <div class="w-32 h-32 rounded-full border-8 border-purple-500/30 flex items-center justify-center">
-                                <div class="text-center">
-                                    <div class="text-2xl font-bold">${totalHours}</div>
+                            <div class="w-36 h-36 rounded-full flex items-center justify-center" style="background: ${donutGradient};">
+                                <div class="w-24 h-24 rounded-full bg-gray-950 flex items-center justify-center">
+                                    <div class="text-center">
+                                    <div class="text-2xl font-bold">${totalHours.toFixed(1)}</div>
                                     <div class="text-xs text-gray-400">Hours</div>
+                                    </div>
                                 </div>
                             </div>
                             <div class="flex-1 space-y-3 ml-6">
-                                ${platformData.map(p => `
+                                ${platformData.length > 0 ? platformData.map(p => `
                                     <div class="flex items-center justify-between text-sm">
                                         <div class="flex items-center gap-2">
                                             <div class="w-3 h-3 rounded-full" style="background-color: ${p.color}"></div>
@@ -628,7 +839,15 @@ const App = (() => {
                                         </div>
                                         <span class="text-gray-400">${p.value}h</span>
                                     </div>
-                                `).join('')}
+                                `).join('') : `
+                                    <div class="flex items-center justify-between text-sm">
+                                        <div class="flex items-center gap-2">
+                                            <div class="w-3 h-3 rounded-full bg-gray-600"></div>
+                                            <span>No listening data</span>
+                                        </div>
+                                        <span class="text-gray-400">0h</span>
+                                    </div>
+                                `}
                             </div>
                         </div>
                     </div>
@@ -636,21 +855,26 @@ const App = (() => {
                 <div class="card">
                     <h3 class="text-xl font-semibold mb-6">Local Libraries</h3>
                     <div class="grid grid-cols-5 gap-4">
-                        ${libraryPlaylists.map(playlist => `
+                        ${hasLocalLibraries ? libraryPlaylists.map(playlist => `
                             <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" data-local-playlist-index="${playlist.sourceIndex}">
                                 <div class="aspect-square rounded-lg overflow-hidden mb-3">
-                        <img src="${playlist.cover || getDefaultCover()}" alt="${playlist.name || 'Playlist'}" class="w-full h-full object-cover">
+                                    <img src="${playlist.cover || getDefaultCover()}" alt="${playlist.name || 'Playlist'}" class="w-full h-full object-cover">
                                 </div>
                                 <h4 class="font-medium text-sm truncate">${playlist.name || 'Untitled Playlist'}</h4>
-                                <p class="text-xs text-gray-400">${playlist.tracks ?? 0} tracks • ${playlist.duration || '--'}</p>
+                                <p class="text-xs text-gray-400">${playlist.tracks ?? 0} tracks - ${playlist.duration || '--'}</p>
                             </div>
-                        `).join('')}
+                        `).join('') : `
+                            <button class="col-span-5 p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" data-empty-manual-play="true">
+                                <div class="text-lg font-medium mb-2">暂无歌曲</div>
+                                <div class="text-sm text-gray-400">点击后可以手动填写一个音频文件路径播放</div>
+                            </button>
+                        `}
                     </div>
                 </div>
                 <div class="card">
                     <h3 class="text-xl font-semibold mb-6">${trackListTitle}</h3>
                     <div class="space-y-2">
-                        ${visibleTracks.map((track, index) => `
+                        ${visibleTracks.length > 0 ? visibleTracks.map((track, index) => `
                             <div class="track-row group" data-track-index="${tracks.indexOf(track)}">
                                 <div class="w-8 text-gray-400 text-sm">${index + 1}</div>
                                 <div class="track-play">
@@ -663,13 +887,17 @@ const App = (() => {
                                 <div class="text-sm text-gray-400">${track.album || 'Local Music'}</div>
                                 <div class="text-sm text-gray-400 w-16 text-right">${track.duration || '--:--'}</div>
                             </div>
-                        `).join('')}
+                        `).join('') : `
+                            <button class="w-full p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" ${hasLocalLibraries ? 'data-rescan-empty-library="true"' : 'data-empty-manual-play="true"'}>
+                                <div class="text-lg font-medium mb-2">${emptyTrackText}</div>
+                                <div class="text-sm text-gray-400">${emptyTrackHint}</div>
+                            </button>
+                        `}
                     </div>
                 </div>
             </div>
         `;
     }
-
     function renderSettings() {
         return `
             <div class="max-w-4xl mx-auto space-y-6">
@@ -882,6 +1110,14 @@ const App = (() => {
             });
         });
 
+        document.querySelectorAll('[data-empty-manual-play]').forEach(el => {
+            el.addEventListener('click', promptAndPlayFile);
+        });
+
+        document.querySelectorAll('[data-rescan-empty-library]').forEach(el => {
+            el.addEventListener('click', scanAllLocalPaths);
+        });
+
         document.querySelectorAll('[data-theme]').forEach(btn => {
             btn.addEventListener('click', () => {
                 settings.theme = btn.dataset.theme;
@@ -934,9 +1170,7 @@ const App = (() => {
         const rescanBtn = document.getElementById('rescan-btn');
         if (rescanBtn) {
             rescanBtn.addEventListener('click', () => {
-                localPaths.forEach(path => {
-                    sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
-                });
+                scanAllLocalPaths();
             });
         }
 
@@ -955,6 +1189,8 @@ const App = (() => {
                     sendToCSharp('resume');
                 } else if (getPlayableQueue().length > 0) {
                     playTrackFromQueue(0);
+                } else if (localPaths.length > 0) {
+                    scanAllLocalPaths();
                 } else {
                     promptAndPlayFile();
                 }
