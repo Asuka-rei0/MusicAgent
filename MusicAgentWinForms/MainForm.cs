@@ -48,9 +48,14 @@ public class MainForm : Form
         if (e.IsSuccess)
         {
             webView.CoreWebView2.WebMessageReceived += CoreWebView2_WebMessageReceived;
+
+            var distPath = Path.Combine(Application.StartupPath, "dist");
+            var wwwrootPath = Path.Combine(Application.StartupPath, "wwwroot");
+            var targetPath = Directory.Exists(distPath) ? distPath : wwwrootPath;
+
             webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 "musicagent.app",
-                Path.Combine(Application.StartupPath, "wwwroot"),
+                targetPath,
                 CoreWebView2HostResourceAccessKind.Allow);
             webView.CoreWebView2.Navigate("https://musicagent.app/index.html");
         }

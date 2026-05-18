@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("MusicAgentWinForms")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c1f5c6274da87da3719df77cffac5acd07cd0e8f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+022edb10448a752dcfd2726d6827b63009bb2cfe")]
 [assembly: System.Reflection.AssemblyProductAttribute("MusicAgentWinForms")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MusicAgentWinForms")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -1,14 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Bot, User, Send } from 'lucide-react';
+import { Bot, User, Send, Loader2, AlertCircle } from 'lucide-react';
 import { usePlayer } from '../../contexts/PlayerContext';
-
-interface Message {
-  id: string;
-  type: 'user' | 'ai';
-  content: string;
-  timestamp: Date;
-}
+import { useAIChat } from '../../hooks/useAIChat';
+import MarkdownRenderer from '../MarkdownRenderer';
 
 interface LyricLine {
   text: string;
@@ -17,20 +12,14 @@ interface LyricLine {
 
 export default function AIRecommendView() {
   const { currentTime } = usePlayer();
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      type: 'user',
-      content: 'Feeling tired, need something soothing...',
-      timestamp: new Date(Date.now() - 120000),
-    },
-    {
-      id: '2',
-      type: 'ai',
-      content: '为您推荐这首爵士乐，慢节奏的钢琴与萨克斯风完美融合，非常适合放松心情。',
-      timestamp: new Date(Date.now() - 60000),
-    },
-  ]);
+  const {
+    messages,
+    isLoading,
+    isStreaming,
+    error,
+    sendMessage,
+    abortRequest,
+  } = useAIChat();
 
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -64,7 +53,6 @@ export default function AIRecommendView() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Auto-scroll lyrics to active line
   useEffect(() => {
     if (activeLyricRef.current && lyricsContainerRef.current) {
       const container = lyricsContainerRef.current;
@@ -74,7 +62,6 @@ export default function AIRecommendView() {
       const lineOffsetTop = activeLine.offsetTop;
       const lineHeight = activeLine.clientHeight;
 
-      // Scroll so active lyric is centered
       const scrollTo = lineOffsetTop - containerHeight / 2 + lineHeight / 2;
 
       container.scrollTo({
@@ -84,51 +71,44 @@ export default function AIRecommendView() {
     }
   }, [activeLyricIndex]);
 
-  const handleSendMessage = () => {
-    if (!inputValue.trim()) return;
-
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      type: 'user',
-      content: inputValue,
-      timestamp: new Date(),
-    };
-
-    setMessages([...messages, newMessage]);
+  const handleSendMessage = async () => {
+    if (!inputValue.trim() || isLoading) return;
+    const content = inputValue;
     setInputValue('');
+    await sendMessage(content);
+  };
 
-    setTimeout(() => {
-      const aiResponse: Message = {
-        id: (Date.now() + 1).toString(),
-        type: 'ai',
-        content: '好的，让我为您推荐符合您心情的音乐...',
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, aiResponse]);
-    }, 1000);
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
+
+  const formatTime = (timestamp: number | string | Date) => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
   return (
     <div className="h-full flex gap-6 p-6 overflow-hidden text-white">
-      {/* Left: Chat & Album */}
       <div className="flex-1 flex flex-col gap-6">
-        {/* Chat Messages */}
-        <div className="flex-1 bg-gradient-to-br from-[#1a1a2e]/80 to-[#12121a]/80 backdrop-blur-xl rounded-2xl border border-white/10 p-6 overflow-auto">
+        <div className="flex-1 bg-gradient-to-br from-[#1a1a2e]/80 to-[#12121a]/80 backdrop-blur-xl rounded-2xl border border-white/10 p-6 overflow-auto flex flex-col">
           <h2 className="text-xl font-semibold mb-6 flex items-center gap-2">
             <Bot className="w-6 h-6 text-purple-400" />
             AI Music Assistant
           </h2>
 
-          <div className="space-y-4">
+          <div className="flex-1 space-y-4 overflow-auto">
             <AnimatePresence>
               {messages.map((message) => (
                 <motion.div
                   key={message.id}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`flex gap-3 ${message.type === 'user' ? 'justify-end' : ''}`}
+                  className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : ''}`}
                 >
-                  {message.type === 'ai' && (
+                  {message.role === 'assistant' && (
                     <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center flex-shrink-0">
                       <Bot className="w-5 h-5" />
                     </div>
@@ -136,18 +116,32 @@ export default function AIRecommendView() {
 
                   <div
                     className={`max-w-[70%] p-4 rounded-2xl ${
-                      message.type === 'user'
+                      message.role === 'user'
                         ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/30'
-                        : 'bg-white/5 border border-white/10'
+                        : message.status === 'error'
+                          ? 'bg-red-500/10 border border-red-500/30'
+                          : 'bg-white/5 border border-white/10'
                     }`}
                   >
-                    <p className="text-sm leading-relaxed">{message.content}</p>
+                    {message.role === 'assistant' ? (
+                      <div className="text-sm leading-relaxed">
+                        <MarkdownRenderer content={message.content} />
+                      </div>
+                    ) : (
+                      <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                    )}
+                    {message.status === 'error' && message.errorMessage && (
+                      <div className="flex items-center gap-2 mt-2 text-xs text-red-400">
+                        <AlertCircle className="w-3 h-3" />
+                        {message.errorMessage}
+                      </div>
+                    )}
                     <p className="text-xs text-gray-500 mt-2">
-                      {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {formatTime(message.timestamp)}
                     </p>
                   </div>
 
-                  {message.type === 'user' && (
+                  {message.role === 'user' && (
                     <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center flex-shrink-0">
                       <User className="w-5 h-5" />
                     </div>
@@ -155,30 +149,70 @@ export default function AIRecommendView() {
                 </motion.div>
               ))}
             </AnimatePresence>
+
+            {isLoading && !isStreaming && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex gap-3"
+              >
+                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center flex-shrink-0">
+                  <Bot className="w-5 h-5" />
+                </div>
+                <div className="bg-white/5 border border-white/10 p-4 rounded-2xl">
+                  <div className="flex items-center gap-2 text-sm text-gray-400">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    AI正在思考...
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {error && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-sm text-red-400"
+              >
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                {error}
+              </motion.div>
+            )}
+
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Input */}
           <div className="mt-6 flex gap-3">
             <input
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+              onKeyDown={handleKeyPress}
+              disabled={isLoading}
               placeholder="Tell me your mood or music preference..."
-              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500/50 transition-colors"
+              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500/50 transition-colors disabled:opacity-50"
             />
-            <button
-              onClick={handleSendMessage}
-              className="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all flex items-center gap-2"
-            >
-              <Send className="w-4 h-4" />
-              Send
-            </button>
+            {isLoading ? (
+              <button
+                onClick={abortRequest}
+                className="px-6 py-3 bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 rounded-xl transition-all flex items-center gap-2 text-red-400"
+              >
+                <Loader2 className="w-4 h-4 animate-spin" />
+                停止
+              </button>
+            ) : (
+              <button
+                onClick={handleSendMessage}
+                disabled={!inputValue.trim()}
+                className="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all flex items-center gap-2 disabled:opacity-50"
+              >
+                <Send className="w-4 h-4" />
+                Send
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Album Cover */}
         <div className="h-64 bg-gradient-to-br from-[#1a1a2e]/80 to-[#12121a]/80 backdrop-blur-xl rounded-2xl border border-white/10 p-6 flex items-center gap-6">
           <div className="w-44 h-44 rounded-xl overflow-hidden shadow-2xl">
             <img
@@ -201,13 +235,12 @@ export default function AIRecommendView() {
         </div>
       </div>
 
-      {/* Right: Synchronized Lyrics */}
       <div className="w-96 bg-gradient-to-br from-[#1a1a2e]/80 to-[#12121a]/80 backdrop-blur-xl rounded-2xl border border-white/10 p-6 flex flex-col">
         <h3 className="text-lg font-semibold mb-6">Lyrics</h3>
 
         <div
           ref={lyricsContainerRef}
-          className="flex-1 flex flex-col justify-start items-center gap-8 overflow-auto py-32"
+          className="lyrics-scroll flex-1 flex flex-col justify-start items-center gap-8 overflow-auto py-32"
           style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
         >
           {lyrics.map((lyric, index) => (
@@ -229,8 +262,8 @@ export default function AIRecommendView() {
             </motion.div>
           ))}
         </div>
-        <style jsx>{`
-          div::-webkit-scrollbar {
+        <style>{`
+          .lyrics-scroll::-webkit-scrollbar {
             display: none;
           }
         `}</style>
