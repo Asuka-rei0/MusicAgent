@@ -109,9 +109,19 @@ public class FileService
             var entry = _localPaths.FirstOrDefault(p => p.Id == data);
             if (entry != null)
             {
+                var removedEntry = new LocalPathEntry
+                {
+                    Id = entry.Id,
+                    Path = entry.Path,
+                    TrackCount = entry.TrackCount
+                };
                 _localPaths.Remove(entry);
                 SaveLocalPaths();
-                return new WebMessageResponse { Action = "removeLocalPath", Data = "Removed" };
+                return new WebMessageResponse
+                {
+                    Action = "removeLocalPath",
+                    Data = JsonSerializer.Serialize(removedEntry)
+                };
             }
             return new WebMessageResponse { Action = "removeLocalPath", Data = "Path not found" };
         }

@@ -14,7 +14,6 @@ const App = (() => {
         { id: '1', type: 'user', content: 'Feeling tired, need something soothing...', timestamp: new Date(Date.now() - 120000) },
         { id: '2', type: 'ai', content: '为您推荐这首爵士乐，慢节奏的钢琴与萨克斯风完美融合，非常适合放松心情。', timestamp: new Date(Date.now() - 60000) }
     ];
-    let playlists = [];
     let tracks = [];
     let weeklyData = [];
     let platformData = [];
@@ -59,15 +58,6 @@ const App = (() => {
             case 'error':
                 alert(`后端处理失败：${data}`);
                 break;
-            case 'getPlaylists':
-                playlists = JSON.parse(data).map(normalizePlaylist);
-                if (playlists.length > 0 && !selectedPlaylist) selectedPlaylist = playlists[0];
-                render();
-                break;
-            case 'getTracks':
-                tracks = JSON.parse(data).map(normalizeTrack);
-                render();
-                break;
             case 'getWeeklyData':
                 weeklyData = JSON.parse(data).map(item => ({
                     day: item.day ?? item.Day,
@@ -85,9 +75,8 @@ const App = (() => {
                 break;
             case 'getLocalPaths':
                 localPaths = normalizeLocalPaths(JSON.parse(data));
-                if (localPaths.length > 0) {
-                    selectedPlaylist = getLibraryPlaylists()[0];
-                }
+                syncTracksWithLocalPaths();
+                syncSelectedPlaylistWithLocalPaths();
                 autoScanLocalPaths();
                 render();
                 break;
@@ -247,14 +236,23 @@ const App = (() => {
         }));
     }
 
-    function normalizePlaylist(playlist) {
-        return {
-            id: playlist.id ?? playlist.Id,
-            name: playlist.name ?? playlist.Name ?? 'Untitled Playlist',
-            tracks: playlist.tracks ?? playlist.Tracks ?? 0,
-            duration: playlist.duration ?? playlist.Duration ?? '--',
-            cover: playlist.cover ?? playlist.Cover ?? getDefaultCover()
-        };
+    function syncTracksWithLocalPaths() {
+        tracks = tracks.filter(track => {
+            if (!track.filePath) return true;
+            return localPaths.some(path => path.path && track.filePath.startsWith(path.path));
+        });
+    }
+
+    function syncSelectedPlaylistWithLocalPaths() {
+        const libraryPlaylists = getLibraryPlaylists();
+        if (libraryPlaylists.length === 0) {
+            selectedPlaylist = null;
+            return;
+        }
+
+        if (!selectedPlaylist?.isLocal || !libraryPlaylists.some(playlist => playlist.path === selectedPlaylist.path)) {
+            selectedPlaylist = libraryPlaylists[0];
+        }
     }
 
     function getLibraryPlaylists() {
@@ -313,11 +311,34 @@ const App = (() => {
 
     function applyRemoveLocalPathResponse(data) {
         if (typeof data === 'string' && data !== 'Removed') {
-            console.warn('Remove local path failed:', data);
+            const removedPath = parseJsonData(data);
+            if (!removedPath || typeof removedPath !== 'object') {
+                console.warn('Remove local path failed:', data);
+                return;
+            }
+
+            removeLocalPathFromState(removedPath.id || removedPath.Id, removedPath.path || removedPath.Path);
+        } else {
+            sendToCSharp('getLocalPaths');
             return;
         }
 
         sendToCSharp('getLocalPaths');
+    }
+
+    function removeLocalPathFromState(pathId, pathValue) {
+        if (!pathId && !pathValue) return;
+
+        localPaths = localPaths.filter(path => path.id !== pathId && path.path !== pathValue);
+
+        if (pathValue) {
+            tracks = tracks.filter(track => !(track.filePath && track.filePath.startsWith(pathValue)));
+        }
+
+        const libraryPlaylists = getLibraryPlaylists();
+        if (selectedPlaylist?.isLocal && (selectedPlaylist.path === pathValue || selectedPlaylist.id === `local-path-${pathId}`)) {
+            selectedPlaylist = libraryPlaylists[0] || null;
+        }
     }
 
     function parseJsonData(data) {
@@ -430,7 +451,6 @@ const App = (() => {
     }
 
     function loadInitialData() {
-        sendToCSharp('getPlaylists');
         sendToCSharp('getWeeklyData');
         sendToCSharp('getPlatformData');
         sendToCSharp('getLocalPaths');
