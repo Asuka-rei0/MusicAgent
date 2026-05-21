@@ -1,17 +1,2 @@
-2026/05/18-23:18:38.122 3b70 Reusing MANIFEST e:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Local Storage\leveldb/MANIFEST-000001
-2026/05/18-23:18:38.127 3b70 Recovering log #10
-2026/05/18-23:18:38.129 3b70 Reusing old log e:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Local Storage\leveldb/000010.log 
-2026/05/18-23:20:27.459 8138 Level-0 table #13: started
-2026/05/18-23:20:27.565 8138 Level-0 table #13: 32932 bytes OK
-2026/05/18-23:20:27.568 8138 Delete type=0 #10
-2026/05/18-23:20:27.569 3b70 Compacting 4@0 + 0@1 files
-2026/05/18-23:20:27.574 3b70 Generated table #14@0: 10 keys, 11999 bytes
-2026/05/18-23:20:27.574 3b70 Compacted 4@0 + 0@1 files => 11999 bytes
-2026/05/18-23:20:27.576 3b70 compacted to: files[ 0 1 0 0 0 0 0 ]
-2026/05/18-23:20:27.577 3b70 Delete type=2 #3
-2026/05/18-23:20:27.577 3b70 Delete type=2 #7
-2026/05/18-23:20:27.577 3b70 Delete type=2 #9
-2026/05/18-23:20:27.577 3b70 Delete type=2 #13
-2026/05/18-23:22:46.295 8138 Level-0 table #16: started
-2026/05/18-23:22:46.301 8138 Level-0 table #16: 27482 bytes OK
-2026/05/18-23:22:46.304 8138 Delete type=0 #12
+2026/05/18-23:40:44.816 a04 Creating DB E:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Local Storage\leveldb since it was missing.
+2026/05/18-23:40:44.840 a04 Reusing MANIFEST E:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Local Storage\leveldb/MANIFEST-000001

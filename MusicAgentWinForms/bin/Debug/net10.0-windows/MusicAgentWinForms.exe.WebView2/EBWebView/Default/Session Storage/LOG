@@ -1,3 +1,2 @@
-2026/05/18-23:18:38.805 3b70 Reusing MANIFEST e:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Session Storage/MANIFEST-000001
-2026/05/18-23:18:38.806 3b70 Recovering log #3
-2026/05/18-23:18:38.807 3b70 Reusing old log e:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Session Storage/000003.log 
+2026/05/18-23:40:45.328 a04 Creating DB E:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Session Storage since it was missing.
+2026/05/18-23:40:45.341 a04 Reusing MANIFEST E:\MusicAgent\MusicAgentWinForms\bin\Debug\net10.0-windows\MusicAgentWinForms.exe.WebView2\EBWebView\Default\Session Storage/MANIFEST-000001

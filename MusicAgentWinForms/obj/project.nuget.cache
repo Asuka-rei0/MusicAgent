@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "sNFnAL+wDB8=",
+  "dgSpecHash": "UJkTfzepuzw=",
   "success": true,
-  "projectFilePath": "e:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
+  "projectFilePath": "E:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\27834\\.nuget\\packages\\microsoft.data.sqlite.core\\10.0.8\\microsoft.data.sqlite.core.10.0.8.nupkg.sha512",
     "C:\\Users\\27834\\.nuget\\packages\\microsoft.entityframeworkcore\\10.0.8\\microsoft.entityframeworkcore.10.0.8.nupkg.sha512",

@@ -3,6 +3,13 @@ import { ConversationManager } from './conversationManager';
 import { apiKeyManager, type ApiKeyConfig } from './apiKeyManager';
 import type { ConversationCallbacks, ConversationMessage, ConversationSession } from './conversationManager';
 
+function getEnvConfig(): { apiKey: string; baseUrl: string; model: string } {
+  const apiKey = import.meta.env.VITE_API_KEY ?? '';
+  const baseUrl = import.meta.env.VITE_API_BASE_URL ?? 'https://api.deepseek.com/v1';
+  const model = import.meta.env.VITE_API_MODEL ?? 'deepseek-chat';
+  return { apiKey, baseUrl, model };
+}
+
 export interface AIChatConfig {
   baseUrl: string;
   apiKey: string;
@@ -26,22 +33,15 @@ export interface AIChatState {
 export type AIChatStateListener = (state: AIChatState) => void;
 
 const DEFAULT_CONFIG: AIChatConfig = {
-  baseUrl: 'https://api.openai.com/v1',
+  baseUrl: 'https://api.deepseek.com/v1',
   apiKey: '',
-  model: 'gpt-3.5-turbo',
+  model: 'deepseek-chat',
   timeoutMs: 30000,
   maxRetries: 2,
   temperature: 0.7,
   maxTokens: 2048,
   enableStreaming: true,
   maxContextMessages: 20,
-};
-
-const BUILTIN_API_CONFIG: ApiKeyConfig = {
-  key: 'sk-a56c2e48284347edb9e61a8e641652f6',
-  provider: 'deepseek',
-  baseUrl: 'https://api.deepseek.com/v1',
-  model: 'deepseek-chat',
 };
 
 export class AIChatService {
@@ -66,11 +66,18 @@ export class AIChatService {
   }
 
   private tryAutoInitialize(): void {
+    const envConfig = getEnvConfig();
+    const storedConfig = apiKeyManager.getConfig();
+
+    const apiKey = storedConfig?.key || envConfig.apiKey;
+    const baseUrl = storedConfig?.baseUrl || envConfig.baseUrl;
+    const model = storedConfig?.model || envConfig.model;
+
     this.config = {
       ...this.config,
-      baseUrl: BUILTIN_API_CONFIG.baseUrl,
-      apiKey: BUILTIN_API_CONFIG.key,
-      model: BUILTIN_API_CONFIG.model,
+      baseUrl,
+      apiKey,
+      model,
     };
     this.setupLLMClient();
   }

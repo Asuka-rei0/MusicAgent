@@ -1,0 +1,13 @@
+E:\MusicAgent\winforms\aaudiocore\bin\Debug\net10.0-windows\AAudioCore.deps.json
+E:\MusicAgent\winforms\aaudiocore\bin\Debug\net10.0-windows\AAudioCore.dll
+E:\MusicAgent\winforms\aaudiocore\bin\Debug\net10.0-windows\AAudioCore.pdb
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.csproj.AssemblyReference.cache
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.GeneratedMSBuildEditorConfig.editorconfig
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.AssemblyInfoInputs.cache
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.AssemblyInfo.cs
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.csproj.CoreCompileInputs.cache
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.sourcelink.json
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.dll
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\refint\AAudioCore.dll
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\AAudioCore.pdb
+E:\MusicAgent\winforms\aaudiocore\obj\Debug\net10.0-windows\ref\AAudioCore.dll

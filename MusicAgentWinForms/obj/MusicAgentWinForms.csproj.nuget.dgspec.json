@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "e:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj": {}
+    "E:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj": {}
   },
   "projects": {
-    "e:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj": {
+    "E:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "e:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
+        "projectUniqueName": "E:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
         "projectName": "MusicAgentWinForms",
-        "projectPath": "e:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
+        "projectPath": "E:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
         "packagesPath": "C:\\Users\\27834\\.nuget\\packages\\",
-        "outputPath": "e:\\MusicAgent\\MusicAgentWinForms\\obj\\",
+        "outputPath": "E:\\MusicAgent\\MusicAgentWinForms\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
