@@ -23,6 +23,12 @@ WinForms 会加载下面目录中的前端页面：
 winforms/uipackage/wwwroot
 ```
 
+## 前端代码说明
+
+- `react/` 是 React 版本的 UI 开发源码。
+- `winforms/uipackage/wwwroot/` 是 WinForms 项目通过 WebView2 实际加载的前端页面。
+- 如果只阅读 WinForms 项目的前端部分，重点看 `winforms/uipackage/wwwroot/app.js`，同时简单了解 `winforms/uipackage/wwwroot/index.html` 即可。
+
 ## 构建项目
 
 ```powershell
