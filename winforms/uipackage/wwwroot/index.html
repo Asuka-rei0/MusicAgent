@@ -105,18 +105,54 @@
         .play-button:hover { transform: scale(1.05); }
         input[type="range"] {
             -webkit-appearance: none;
-            height: 4px;
-            border-radius: 2px;
-            background: rgba(255,255,255,0.2);
+            height: 10px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.12);
             outline: none;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        input[type="range"]::-webkit-slider-runnable-track {
+            height: 10px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.12);
         }
         input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            width: 12px;
-            height: 12px;
+            width: 18px;
+            height: 18px;
             border-radius: 50%;
             background: #a78bfa;
             cursor: pointer;
+            margin-top: -4px;
+            box-shadow: 0 0 0 8px rgba(167,139,250,0.08);
+        }
+        input[type="range"]:focus::-webkit-slider-runnable-track {
+            background: rgba(167,139,250,0.18);
+        }
+        input[type="range"]::-moz-range-track {
+            height: 10px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.12);
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #a78bfa;
+            border: none;
+            box-shadow: 0 0 0 8px rgba(167,139,250,0.08);
+        }
+        input[type="range"]::-ms-track {
+            height: 10px;
+            background: transparent;
+            border-color: transparent;
+            color: transparent;
+        }
+        input[type="range"]::-ms-fill-lower,
+        input[type="range"]::-ms-fill-upper {
+            background: rgba(255,255,255,0.12);
+            border-radius: 6px;
         }
         .chart-bar {
             transition: height 0.3s ease;
@@ -244,6 +280,53 @@
             color: #111827 !important;
         }
         body.theme-light input::placeholder { color: #64748b; }
+        body.theme-light .bg-gray-950 { background-color: #f0f0f0 !important; }
+        body.theme-light .bg-gray-600 { background-color: #cbd5e1 !important; }
+        /* AI Discovery Banner - Keep text white in light theme for readability on dark image */
+        body.theme-light .ai-discovery-banner .banner-title { color: white !important; }
+        body.theme-light .ai-discovery-banner .banner-subtitle { color: rgba(255,255,255,0.85) !important; }
+
+        /* Light theme range slider visibility */
+        body.theme-light input[type="range"] {
+            background: rgba(15,23,42,0.18) !important;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        body.theme-light input[type="range"]::-webkit-slider-runnable-track {
+            background: rgba(15,23,42,0.18) !important;
+        }
+        body.theme-light input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #7c3aed !important;
+            margin-top: -4px;
+            box-shadow: 0 0 0 6px rgba(124,58,237,0.12);
+            cursor: pointer;
+        }
+        body.theme-light input[type="range"]::-moz-range-track {
+            background: rgba(15,23,42,0.18) !important;
+        }
+        body.theme-light input[type="range"]::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #7c3aed !important;
+            border: none;
+            box-shadow: 0 0 0 6px rgba(124,58,237,0.12);
+        }
+        body.theme-light input[type="range"]::-ms-track {
+            background: transparent;
+            color: transparent;
+            height: 10px;
+        }
+        body.theme-light input[type="range"]::-ms-fill-lower,
+        body.theme-light input[type="range"]::-ms-fill-upper {
+            background: rgba(15,23,42,0.18) !important;
+            border-radius: 6px;
+        }
+
     </style>
 </head>
 <body>

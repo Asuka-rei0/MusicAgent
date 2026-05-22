@@ -1012,12 +1012,12 @@ const App = (() => {
         ];
         return `
             <div class="space-y-8">
-                <div class="relative h-64 rounded-2xl overflow-hidden">
+                <div class="relative h-64 rounded-2xl overflow-hidden ai-discovery-banner">
                     <img src="https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=1200&h=400&fit=crop" alt="AI Discovery" class="w-full h-full object-cover">
                     <div class="absolute inset-0 bg-gradient-to-r from-black/80 via-black/50 to-transparent flex items-center">
                         <div class="p-12">
-                            <h2 class="text-4xl font-bold mb-3">AI Discovery: Today Mood Radio</h2>
-                            <p class="text-lg text-gray-300 mb-6">Curated music for today based on your listening habits</p>
+                            <h2 class="text-4xl font-bold mb-3 banner-title">AI Discovery: Today Mood Radio</h2>
+                            <p class="text-lg text-gray-300 mb-6 banner-subtitle">Curated music for today based on your listening habits</p>
                             <button class="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all font-medium">Start Listening</button>
                         </div>
                     </div>
