@@ -25,6 +25,9 @@ const App = (() => {
     let lastProgressFilePath = '';
     let lastProgressTime = 0;
     let lastProgressWasPlaying = false;
+    let hasAutoRestoredPlayback = false;
+    let pendingRestoreTime = 0;
+    let lastPlaybackStateSavedAt = 0;
     let lyrics = [{ text: 'No lyrics loaded', time: 0 }];
     let aiConfig = loadAIConfig();
     let aiState = { isLoading: false, error: null };
@@ -49,7 +52,9 @@ const App = (() => {
         } else {
             window.addEventListener('message', handleWebMessage);
         }
+        window.addEventListener('beforeunload', () => savePlaybackState(currentTime, true));
         loadInitialData();
+        applyTheme();
         render();
         startProgressTimer();
     }
@@ -95,8 +100,10 @@ const App = (() => {
                 render();
                 break;
             case 'getSettings':
-                settings = JSON.parse(data);
+                settings = normalizeSettings(JSON.parse(data));
+                applyTheme();
                 render();
+                tryAutoRestorePlayback();
                 break;
             case 'scanFolder':
                 applyScanFolderResponse(data);
@@ -154,6 +161,18 @@ const App = (() => {
         }
 
         syncLyricHighlight();
+
+        if (currentFilePath && currentFilePath !== previousFilePath) {
+            savePlaybackState(0, true);
+        }
+
+        if (pendingRestoreTime > 0 && duration > 0) {
+            const restorePercent = Math.min((pendingRestoreTime / duration) * 100, 99);
+            pendingRestoreTime = 0;
+            sendToCSharp('setProgress', restorePercent.toString());
+        }
+
+        maybeSavePlaybackState();
     }
 
     function applyScanFolderResponse(data) {
@@ -621,6 +640,57 @@ const App = (() => {
         sendToCSharp('getSettings');
     }
 
+    function normalizeTheme(theme) {
+        return theme === 'light' ? 'light' : 'dark';
+    }
+
+    function normalizeSettings(rawSettings) {
+        const source = rawSettings || {};
+        return {
+            id: source.id ?? source.Id ?? settings.id ?? 1,
+            theme: normalizeTheme(source.theme ?? source.Theme ?? settings.theme),
+            autoPlay: Boolean(source.autoPlay ?? source.AutoPlay ?? settings.autoPlay),
+            desktopLyrics: Boolean(source.desktopLyrics ?? source.DesktopLyrics ?? settings.desktopLyrics),
+            colorFollowAlbum: Boolean(source.colorFollowAlbum ?? source.ColorFollowAlbum ?? settings.colorFollowAlbum),
+            lastTrackPath: source.lastTrackPath ?? source.LastTrackPath ?? settings.lastTrackPath ?? '',
+            lastPlaybackTime: Number(source.lastPlaybackTime ?? source.LastPlaybackTime ?? settings.lastPlaybackTime ?? 0) || 0
+        };
+    }
+
+    function applyTheme() {
+        settings.theme = normalizeTheme(settings.theme);
+        document.body.classList.toggle('theme-light', settings.theme === 'light');
+        document.body.classList.toggle('theme-dark', settings.theme === 'dark');
+    }
+
+    function tryAutoRestorePlayback() {
+        if (hasAutoRestoredPlayback || !settings.autoPlay || !settings.lastTrackPath) return;
+
+        hasAutoRestoredPlayback = true;
+        pendingRestoreTime = Math.max(0, Number(settings.lastPlaybackTime) || 0);
+        playFile(settings.lastTrackPath, getFileNameWithoutExtension(settings.lastTrackPath), 'Local file', { skipSave: true });
+    }
+
+    function savePlaybackState(playbackTime = currentTime, force = false) {
+        if (!currentFilePath) return;
+
+        const now = Date.now();
+        if (!force && now - lastPlaybackStateSavedAt < 10000) return;
+
+        lastPlaybackStateSavedAt = now;
+        settings.lastTrackPath = currentFilePath;
+        settings.lastPlaybackTime = Math.max(0, Number(playbackTime) || 0);
+        sendToCSharp('savePlaybackState', JSON.stringify({
+            lastTrackPath: settings.lastTrackPath,
+            lastPlaybackTime: settings.lastPlaybackTime
+        }));
+    }
+
+    function maybeSavePlaybackState() {
+        if (!isPlaying) return;
+        savePlaybackState(currentTime);
+    }
+
     function startProgressTimer() {
         setInterval(() => {
             if (isPlaying) {
@@ -646,7 +716,7 @@ const App = (() => {
         return parts.length > 1 ? parts[parts.length - 2] : 'Local Music';
     }
 
-    function playFile(filePath, title = getFileNameWithoutExtension(filePath), artist = 'Local file') {
+    function playFile(filePath, title = getFileNameWithoutExtension(filePath), artist = 'Local file', options = {}) {
         if (!filePath) return;
 
         currentFilePath = filePath;
@@ -654,6 +724,7 @@ const App = (() => {
         currentTrackArtist = artist;
         isPlaying = true;
         requestLyricsForFile(filePath);
+        if (!options.skipSave) savePlaybackState(0, true);
         sendToCSharp('play', JSON.stringify({ filePath }));
         renderPlayer();
     }
@@ -691,6 +762,7 @@ const App = (() => {
             isPlaying = true;
 
             requestLyricsForFile(track.sourceUri);
+            savePlaybackState(0, true);
             sendToCSharp('setQueue', JSON.stringify({ tracks: queue, startIndex }));
             sendToCSharp('play', JSON.stringify({ filePath: track.sourceUri }));
             renderPlayer();
@@ -1103,9 +1175,9 @@ const App = (() => {
                         <div>
                             <label class="block text-sm text-gray-400 mb-3">主题模式</label>
                             <div class="flex gap-2">
-                                ${['light', 'dark', 'system'].map(t => `
+                                ${['light', 'dark'].map(t => `
                                     <button class="px-4 py-2 rounded-lg border ${settings.theme === t ? 'bg-purple-500/20 text-purple-400 border-purple-500' : 'border-white/10 text-gray-400 hover:bg-white/5'} transition-colors" data-theme="${t}">
-                                        ${t === 'light' ? '浅色' : t === 'dark' ? '深色' : '跟随系统'}
+                                        ${t === 'light' ? '浅色' : '深色'}
                                     </button>
                                 `).join('')}
                             </div>
@@ -1335,7 +1407,8 @@ const App = (() => {
 
         document.querySelectorAll('[data-theme]').forEach(btn => {
             btn.addEventListener('click', () => {
-                settings.theme = btn.dataset.theme;
+                settings.theme = normalizeTheme(btn.dataset.theme);
+                applyTheme();
                 sendToCSharp('saveSettings', JSON.stringify(settings));
                 render();
             });
@@ -1421,6 +1494,7 @@ const App = (() => {
         if (playPauseBtn) {
             playPauseBtn.addEventListener('click', () => {
                 if (isPlaying) {
+                    savePlaybackState(currentTime, true);
                     isPlaying = false;
                     sendToCSharp('pause');
                 } else if (currentFilePath) {
@@ -1440,6 +1514,7 @@ const App = (() => {
         const previousBtn = document.getElementById('previous-btn');
         if (previousBtn) {
             previousBtn.addEventListener('click', () => {
+                savePlaybackState(currentTime, true);
                 sendToCSharp('previous');
             });
         }
@@ -1447,6 +1522,7 @@ const App = (() => {
         const nextBtn = document.getElementById('next-btn');
         if (nextBtn) {
             nextBtn.addEventListener('click', () => {
+                savePlaybackState(currentTime, true);
                 sendToCSharp('next');
             });
         }
@@ -1462,6 +1538,7 @@ const App = (() => {
                 progress = parseFloat(e.target.value);
                 currentTime = (progress / 100) * duration;
                 sendToCSharp('setProgress', progress.toString());
+                savePlaybackState(currentTime, true);
             });
         }
 

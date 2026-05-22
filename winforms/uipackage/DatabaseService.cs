@@ -16,9 +16,27 @@ public class DatabaseService
             .Options;
         _context = new MusicDbContext(options);
         _context.Database.EnsureCreated();
+        EnsureSettingsColumns();
         EnsureListeningHistoryTable();
         DeleteOldListeningHistory();
         EnsureSettings();
+    }
+
+    private void EnsureSettingsColumns()
+    {
+        var columns = _context.Database
+            .SqlQueryRaw<string>("SELECT name AS Value FROM pragma_table_info('Settings')")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (!columns.Contains(nameof(AppSettings.LastTrackPath)))
+        {
+            _context.Database.ExecuteSqlRaw("ALTER TABLE Settings ADD COLUMN LastTrackPath TEXT NOT NULL DEFAULT ''");
+        }
+
+        if (!columns.Contains(nameof(AppSettings.LastPlaybackTime)))
+        {
+            _context.Database.ExecuteSqlRaw("ALTER TABLE Settings ADD COLUMN LastPlaybackTime REAL NOT NULL DEFAULT 0");
+        }
     }
 
     private void EnsureSettings()
@@ -78,6 +96,8 @@ public class DatabaseService
                     existing.AutoPlay = settings.AutoPlay;
                     existing.DesktopLyrics = settings.DesktopLyrics;
                     existing.ColorFollowAlbum = settings.ColorFollowAlbum;
+                    existing.LastTrackPath = settings.LastTrackPath;
+                    existing.LastPlaybackTime = settings.LastPlaybackTime;
                 }
                 else
                 {
@@ -91,6 +111,35 @@ public class DatabaseService
         catch (Exception ex)
         {
             return new WebMessageResponse { Action = "saveSettings", Data = $"Error: {ex.Message}" };
+        }
+    }
+
+    public WebMessageResponse SavePlaybackState(string data)
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<PlaybackStateRequest>(data, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (request == null)
+            {
+                return new WebMessageResponse { Action = "savePlaybackState", Data = "Invalid playback state" };
+            }
+
+            var settings = _context.Settings.FirstOrDefault();
+            if (settings == null)
+            {
+                settings = new AppSettings();
+                _context.Settings.Add(settings);
+            }
+
+            settings.LastTrackPath = request.LastTrackPath ?? string.Empty;
+            settings.LastPlaybackTime = Math.Max(0, request.LastPlaybackTime);
+            _context.SaveChanges();
+
+            return new WebMessageResponse { Action = "savePlaybackState", Data = "Saved" };
+        }
+        catch (Exception ex)
+        {
+            return new WebMessageResponse { Action = "savePlaybackState", Data = $"Error: {ex.Message}" };
         }
     }
 
@@ -215,6 +264,12 @@ public class ListeningTimeRequest
     public double DurationSeconds { get; set; }
 }
 
+public class PlaybackStateRequest
+{
+    public string LastTrackPath { get; set; } = string.Empty;
+    public double LastPlaybackTime { get; set; }
+}
+
 public class AppSettings
 {
     [Key]
@@ -223,5 +278,7 @@ public class AppSettings
     public bool AutoPlay { get; set; } = true;
     public bool DesktopLyrics { get; set; } = false;
     public bool ColorFollowAlbum { get; set; } = true;
+    public string LastTrackPath { get; set; } = string.Empty;
+    public double LastPlaybackTime { get; set; }
 }
 

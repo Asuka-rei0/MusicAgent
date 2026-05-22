@@ -104,6 +104,7 @@ public class MainForm : Form
             "getLyrics" => fileService.GetLyrics(request.Data),
             "getSettings" => dbService.GetSettings(),
             "saveSettings" => dbService.SaveSettings(request.Data),
+            "savePlaybackState" => dbService.SavePlaybackState(request.Data),
             "getWeeklyData" => dbService.GetWeeklyData(),
             "getPlatformData" => dbService.GetPlatformData(),
             "recordListeningTime" => dbService.RecordListeningTime(request.Data),
