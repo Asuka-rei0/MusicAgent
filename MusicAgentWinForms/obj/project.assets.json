@@ -1,7 +1,7 @@
 {
-  "version": 3,
+  "version": 4,
   "targets": {
-    "net10.0-windows7.0": {
+    "net10.0-windows": {
       "Microsoft.Data.Sqlite.Core/10.0.8": {
         "type": "package",
         "dependencies": {
@@ -1350,26 +1350,31 @@
     }
   },
   "projectFileDependencyGroups": {
-    "net10.0-windows7.0": [
+    "net10.0-windows": [
       "Microsoft.EntityFrameworkCore.Sqlite >= 10.0.8",
       "Microsoft.Web.WebView2 >= 1.0.3967.48",
       "NAudio >= 2.3.0"
     ]
   },
   "packageFolders": {
-    "C:\\Users\\27834\\.nuget\\packages\\": {}
+    "C:\\Users\\吴金泉\\.nuget\\packages\\": {},
+    "E:\\vs\\shared\\NuGetPackages": {}
   },
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
+      "projectUniqueName": "E:\\1\\soft\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
       "projectName": "MusicAgentWinForms",
-      "projectPath": "D:\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
-      "packagesPath": "C:\\Users\\27834\\.nuget\\packages\\",
-      "outputPath": "D:\\MusicAgent\\MusicAgentWinForms\\obj\\",
+      "projectPath": "E:\\1\\soft\\MusicAgent\\MusicAgentWinForms\\MusicAgentWinForms.csproj",
+      "packagesPath": "C:\\Users\\吴金泉\\.nuget\\packages\\",
+      "outputPath": "E:\\1\\soft\\MusicAgent\\MusicAgentWinForms\\obj\\",
       "projectStyle": "PackageReference",
+      "fallbackFolders": [
+        "E:\\vs\\shared\\NuGetPackages"
+      ],
       "configFilePaths": [
-        "C:\\Users\\27834\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Users\\吴金泉\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
         "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
       ],
       "originalTargetFrameworks": [
@@ -1380,7 +1385,8 @@
         "https://api.nuget.org/v3/index.json": {}
       },
       "frameworks": {
-        "net10.0-windows7.0": {
+        "net10.0-windows": {
+          "framework": "net10.0-windows7.0",
           "targetAlias": "net10.0-windows",
           "projectReferences": {}
         }
@@ -1395,10 +1401,11 @@
         "auditLevel": "low",
         "auditMode": "all"
       },
-      "SdkAnalysisLevel": "10.0.200"
+      "SdkAnalysisLevel": "10.0.300"
     },
     "frameworks": {
-      "net10.0-windows7.0": {
+      "net10.0-windows": {
+        "framework": "net10.0-windows7.0",
         "targetAlias": "net10.0-windows",
         "dependencies": {
           "Microsoft.EntityFrameworkCore.Sqlite": {
@@ -1433,7 +1440,7 @@
             "privateAssets": "none"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.203/PortableRuntimeIdentifierGraph.json",
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.300/PortableRuntimeIdentifierGraph.json",
         "packagesToPrune": {
           "Microsoft.CSharp": "(,4.7.32767]",
           "Microsoft.VisualBasic": "(,10.4.32767]",
