@@ -17,20 +17,7 @@ interface LyricLine {
 
 export default function AIRecommendView() {
   const { currentTime } = usePlayer();
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      type: 'user',
-      content: 'Feeling tired, need something soothing...',
-      timestamp: new Date(Date.now() - 120000),
-    },
-    {
-      id: '2',
-      type: 'ai',
-      content: '为您推荐这首爵士乐，慢节奏的钢琴与萨克斯风完美融合，非常适合放松心情。',
-      timestamp: new Date(Date.now() - 60000),
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
 
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -101,7 +88,7 @@ export default function AIRecommendView() {
       const aiResponse: Message = {
         id: (Date.now() + 1).toString(),
         type: 'ai',
-        content: '好的，让我为您推荐符合您心情的音乐...',
+        content: 'Okay, let me recommend music that fits your mood...',
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, aiResponse]);
@@ -113,13 +100,13 @@ export default function AIRecommendView() {
       {/* Left: Chat & Album */}
       <div className="flex-1 flex flex-col gap-6">
         {/* Chat Messages */}
-        <div className="flex-1 bg-gradient-to-br from-[#1a1a2e]/80 to-[#12121a]/80 backdrop-blur-xl rounded-2xl border border-white/10 p-6 overflow-auto">
-          <h2 className="text-xl font-semibold mb-6 flex items-center gap-2">
+        <div className="flex-1 bg-gradient-to-br from-[#1a1a2e]/80 to-[#12121a]/80 backdrop-blur-xl rounded-2xl border border-white/10 p-6 flex flex-col overflow-hidden">
+          <h2 className="text-xl font-semibold mb-6 flex items-center gap-2 flex-shrink-0">
             <Bot className="w-6 h-6 text-purple-400" />
             AI Music Assistant
           </h2>
 
-          <div className="space-y-4">
+          <div className="flex-1 overflow-auto space-y-4">
             <AnimatePresence>
               {messages.map((message) => (
                 <motion.div
@@ -159,7 +146,7 @@ export default function AIRecommendView() {
           </div>
 
           {/* Input */}
-          <div className="mt-6 flex gap-3">
+          <div className="mt-6 flex gap-3 flex-shrink-0">
             <input
               type="text"
               value={inputValue}

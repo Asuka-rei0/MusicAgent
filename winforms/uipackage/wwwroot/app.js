@@ -6,14 +6,11 @@ const App = (() => {
     let currentTime = 0;
     let duration = 0;
     let currentFilePath = '';
-    let currentTrackTitle = '未知歌曲';
-    let currentTrackArtist = '未知艺术家';
+    let currentTrackTitle = 'Unknown Track';
+    let currentTrackArtist = 'Unknown Artist';
     let playbackStrategy = 'normal';
     let isLiked = false;
-    let messages = [
-        { id: '1', type: 'user', content: 'Feeling tired, need something soothing...', timestamp: new Date(Date.now() - 120000) },
-        { id: '2', type: 'ai', content: '为您推荐这首爵士乐，慢节奏的钢琴与萨克斯风完美融合，非常适合放松心情。', timestamp: new Date(Date.now() - 60000) }
-    ];
+    let messages = [];
     let tracks = [];
     let weeklyData = [];
     let platformData = [];
@@ -29,6 +26,15 @@ const App = (() => {
     let lastProgressTime = 0;
     let lastProgressWasPlaying = false;
     let lyrics = [{ text: 'No lyrics loaded', time: 0 }];
+    let aiConfig = loadAIConfig();
+    let aiState = { isLoading: false, error: null };
+    let aiRecommendedTracks = [];
+    const aiSystemPrompt = [
+        'You are an AI music assistant for MusicAgent.',
+        'Help users discover music based on mood, preferences, and listening habits.',
+        'Keep responses concise, friendly, and music-focused.',
+        'When recommending, mention specific songs or artists when possible.'
+    ].join(' ');
 
     const navItems = [
         { path: 'ai-recommend', label: 'AI Recommend', icon: 'sparkles' },
@@ -56,14 +62,14 @@ const App = (() => {
         
         switch (action) {
             case 'error':
-                alert(`后端处理失败：${data}`);
+                alert(`Backend processing failed: ${data}`);
                 break;
             case 'getWeeklyData':
                 weeklyData = JSON.parse(data).map(item => ({
                     day: item.day ?? item.Day,
                     hours: Number(item.hours ?? item.Hours ?? 0)
                 }));
-                render();
+                if (currentView === 'library') render();
                 break;
             case 'getPlatformData':
                 platformData = JSON.parse(data).map(item => ({
@@ -71,7 +77,7 @@ const App = (() => {
                     value: Number(item.value ?? item.Value ?? 0),
                     color: item.color ?? item.Color ?? '#8B5CF6'
                 }));
-                render();
+                if (currentView === 'library') render();
                 break;
             case 'getLocalPaths':
                 localPaths = normalizeLocalPaths(JSON.parse(data));
@@ -154,7 +160,7 @@ const App = (() => {
         const scanData = parseJsonData(data);
         if (!scanData || !Array.isArray(scanData.files)) {
             isScanningLocalPaths = false;
-            alert(`扫描失败：${data}`);
+            alert(`Scan failed: ${data}`);
             return;
         }
 
@@ -194,7 +200,7 @@ const App = (() => {
         isScanningLocalPaths = false;
 
         if (scannedTracks.length === 0) {
-            alert('扫描完成，但这个文件夹里没有找到支持的音频文件。');
+            alert('Scan completed, but no supported audio files were found in this folder.');
         }
     }
 
@@ -203,7 +209,7 @@ const App = (() => {
         const pathValue = pathData?.path || pathData?.Path;
         if (!pathData || typeof pathData !== 'object' || !pathValue) {
             console.warn('Add local path failed:', data);
-            alert(`添加路径失败：${data}`);
+            alert(`Failed to add path: ${data}`);
             return;
         }
 
@@ -348,6 +354,164 @@ const App = (() => {
         } catch {
             return null;
         }
+    }
+
+    function loadAIConfig() {
+        const defaults = {
+            baseUrl: 'https://api.deepseek.com/v1',
+            apiKey: '',
+            model: 'deepseek-chat',
+            temperature: 0.7,
+            maxTokens: 2048
+        };
+
+        try {
+            const saved = localStorage.getItem('musicagent.ai.config');
+            return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
+        } catch {
+            return defaults;
+        }
+    }
+
+    function saveAIConfig() {
+        localStorage.setItem('musicagent.ai.config', JSON.stringify(aiConfig));
+    }
+
+    function getChatContext() {
+        const localTrackHints = tracks
+            .slice(0, 20)
+            .map(track => `${track.title || getFileNameWithoutExtension(track.filePath || '')} - ${track.artist || 'Unknown Artist'}`)
+            .join('\n');
+
+        return localTrackHints
+            ? `Local library candidates:\n${localTrackHints}`
+            : 'The local library is empty or still scanning.';
+    }
+
+    function getAIConversationMessages(userContent) {
+        const recentMessages = messages
+            .slice(-8)
+            .filter(msg => msg.content && msg.type !== 'system')
+            .map(msg => ({
+                role: msg.type === 'user' ? 'user' : 'assistant',
+                content: msg.content
+            }));
+
+        return [
+            { role: 'system', content: `${aiSystemPrompt}\n${getChatContext()}` },
+            ...recentMessages
+        ];
+    }
+
+    async function requestAIMessage(userContent) {
+        if (!aiConfig.apiKey || !aiConfig.apiKey.trim()) {
+            throw new Error('AI API key is not configured. Please fill it in Settings.');
+        }
+
+        const response = await fetch(`${aiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${aiConfig.apiKey}`
+            },
+            body: JSON.stringify({
+                model: aiConfig.model,
+                messages: getAIConversationMessages(userContent),
+                temperature: Number(aiConfig.temperature) || 0.7,
+                max_tokens: Number(aiConfig.maxTokens) || 2048,
+                stream: false
+            })
+        });
+
+        if (!response.ok) {
+            let message = `AI request failed: HTTP ${response.status}`;
+            try {
+                const errorData = await response.json();
+                message = errorData.error?.message || errorData.message || message;
+            } catch {
+                try {
+                    const errorText = await response.text();
+                    if (errorText) message = errorText;
+                } catch {
+                    // keep default message
+                }
+            }
+            throw new Error(message);
+        }
+
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content;
+        if (!content) {
+            throw new Error('AI service returned an empty response.');
+        }
+
+        return content;
+    }
+
+    function getKeywordsFromPrompt(prompt) {
+        const lower = prompt.toLowerCase();
+        const mappings = {
+            tired: ['chill', 'slow', 'soft'],
+            soothing: ['chill', 'soft', 'acoustic'],
+            sleepy: ['slow', 'ambient', 'soft'],
+            relaxed: ['chill', 'acoustic', 'soft'],
+            happy: ['pop', 'upbeat', 'bright'],
+            sad: ['slow', 'acoustic', 'piano'],
+            focus: ['instrumental', 'ambient', 'piano'],
+            focused: ['instrumental', 'ambient', 'piano'],
+            workout: ['rock', 'dance', 'fast'],
+            party: ['dance', 'pop', 'upbeat'],
+            romantic: ['love', 'soft', 'acoustic'],
+            jazz: ['jazz'],
+            rock: ['rock'],
+            pop: ['pop'],
+            classical: ['classical', 'piano'],
+            electronic: ['electronic', 'dance'],
+            'lo-fi': ['lo-fi', 'chill'],
+            lofi: ['lo-fi', 'chill']
+        };
+
+        const keywords = [];
+        Object.entries(mappings).forEach(([word, tags]) => {
+            if (lower.includes(word)) keywords.push(...tags);
+        });
+
+        return keywords.length > 0 ? [...new Set(keywords)] : ['chill', 'balanced'];
+    }
+
+    function scoreTrackByKeywords(track, keywords) {
+        const haystack = [
+            track.title,
+            track.artist,
+            track.album,
+            getParentFolderName(track.filePath || '')
+        ].join(' ').toLowerCase();
+
+        return keywords.reduce((score, keyword) => {
+            return score + (haystack.includes(keyword.toLowerCase()) ? 2 : 0);
+        }, 0) + (track.filePath ? 1 : 0);
+    }
+
+    function recommendLocalTracks(prompt, count = 5) {
+        const keywords = getKeywordsFromPrompt(prompt);
+        const scored = tracks
+            .filter(track => track.filePath || track.sourceUri)
+            .map(track => ({ track, score: scoreTrackByKeywords(track, keywords) }))
+            .sort((a, b) => b.score - a.score);
+
+        return scored.slice(0, count).map(item => item.track);
+    }
+
+    function buildLocalRecommendationText(prompt, recommendedTracks) {
+        if (recommendedTracks.length === 0) {
+            return 'I can help with music recommendations, but your local library is empty right now. Add or scan a music folder in Settings, or configure an AI API key for online chat.';
+        }
+
+        const names = recommendedTracks
+            .map((track, index) => `${index + 1}. ${track.title || getFileNameWithoutExtension(track.filePath || '')} - ${track.artist || 'Unknown Artist'}`)
+            .join('\n');
+
+        return `Based on "${prompt}", I picked these from your local library:\n${names}`;
     }
 
     function requestLyricsForFile(filePath) {
@@ -547,13 +711,13 @@ const App = (() => {
     }
 
     function getPlaybackStrategyLabel() {
-        if (playbackStrategy === 'shuffle') return '随机';
-        if (playbackStrategy === 'repeat') return '循环';
-        return '顺序';
+        if (playbackStrategy === 'shuffle') return '闅忔満';
+        if (playbackStrategy === 'repeat') return '寰幆';
+        return '椤哄簭';
     }
 
     function promptAndPlayFile() {
-        const filePath = prompt('请输入本地音乐文件完整路径:');
+        const filePath = prompt('Enter the full path of a local music file:');
         if (filePath) {
             playFile(filePath);
         }
@@ -698,27 +862,38 @@ const App = (() => {
         return `
             <div class="h-full flex gap-6 overflow-hidden">
                 <div class="flex-1 flex flex-col gap-6">
-                    <div class="card flex-1 overflow-auto">
-                        <h2 class="text-xl font-semibold mb-6 flex items-center gap-2">
+                    <div class="card flex-1 flex flex-col overflow-hidden">
+                        <h2 class="text-xl font-semibold mb-6 flex items-center gap-2 flex-shrink-0">
                             <svg class="w-6 h-6 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
                             AI Music Assistant
                         </h2>
-                        <div class="space-y-4 mb-6" id="chat-messages">
+                        <div class="flex-1 overflow-auto space-y-4 mb-6 pr-1" id="chat-messages">
                             ${messages.map(msg => `
                                 <div class="flex gap-3 ${msg.type === 'user' ? 'justify-end' : ''}">
                                     ${msg.type === 'ai' ? `<div class="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center flex-shrink-0"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg></div>` : ''}
                                     <div class="message-bubble ${msg.type === 'user' ? 'message-user' : 'message-ai'}">
-                                        <p class="text-sm leading-relaxed">${msg.content}</p>
+                                        <p class="text-sm leading-relaxed whitespace-pre-line">${escapeHtml(msg.content)}</p>
                                         <p class="text-xs text-gray-500 mt-2">${msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
                                     </div>
                                     ${msg.type === 'user' ? `<div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center flex-shrink-0"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg></div>` : ''}
                                 </div>
                             `).join('')}
+                            ${aiState.isLoading ? `
+                                <div class="flex gap-3 flex-shrink-0">
+                                    <div class="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center flex-shrink-0">
+                                        <svg class="w-5 h-5 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                                    </div>
+                                    <div class="message-bubble message-ai">
+                                        <p class="text-sm leading-relaxed">AI is thinking...</p>
+                                    </div>
+                                </div>
+                            ` : ''}
                         </div>
-                        <div class="flex gap-3">
+                        ${aiState.error ? `<div class="mb-4 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3">${escapeHtml(aiState.error)}</div>` : ''}
+                        <div class="flex gap-3 flex-shrink-0">
                             <input type="text" id="chat-input" placeholder="Tell me your mood or music preference..." 
                                 class="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-purple-500/50 transition-colors text-white">
-                            <button id="send-btn" class="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all flex items-center gap-2">
+                            <button id="send-btn" class="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all flex items-center gap-2 disabled:opacity-50" ${aiState.isLoading ? 'disabled' : ''}>
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
                                 Send
                             </button>
@@ -729,10 +904,10 @@ const App = (() => {
                             <img src="https://images.unsplash.com/photo-1511379938547-c1f69419868d?w=400&h=400&fit=crop" alt="Midnight Jazz" class="w-full h-full object-cover">
                         </div>
                         <div class="flex-1">
-                            <h3 class="text-2xl font-bold mb-2">Midnight Jazz</h3>
-                            <p class="text-gray-400 mb-4">Smooth Jazz Ensemble</p>
+                            <h3 class="text-2xl font-bold mb-2">${escapeHtml(aiRecommendedTracks[0]?.title || 'AI Local Picks')}</h3>
+                            <p class="text-gray-400 mb-4">${escapeHtml(aiRecommendedTracks[0]?.artist || 'Ask for a mood to generate recommendations')}</p>
                             <div class="flex gap-2 text-sm text-gray-500">
-                                <span>2024</span><span>•</span><span>12 tracks</span><span>•</span><span>Jazz</span>
+                                <span></span><span>•</span><span>tracks</span><span>•</span><span></span>
                             </div>
                         </div>
                     </div>
@@ -759,9 +934,9 @@ const App = (() => {
         ];
         const charts = [
             { platform: 'Spotify', color: 'from-orange-500 to-amber-500', tracks: ['Blinding Lights', 'Save Your Tears', 'Levitating'] },
-            { platform: 'NetEase Cloud', color: 'from-red-500 to-rose-600', tracks: ['晴天', '七里香', '稻香'] },
+            { platform: 'NetEase Cloud', color: 'from-red-500 to-rose-600', tracks: ['Sunny Day', 'Qilixiang', 'Rice Aroma'] },
             { platform: 'Apple Music', color: 'from-yellow-400 to-amber-500', tracks: ['As It Was', 'Anti-Hero', 'Flowers'] },
-            { platform: 'QQ Music', color: 'from-emerald-500 to-teal-500', tracks: ['年少有为', '起风了', '光年之外'] }
+            { platform: 'QQ Music', color: 'from-emerald-500 to-teal-500', tracks: ['Young and Promising', 'Wind Rises', 'Light Years Away'] }
         ];
         return `
             <div class="space-y-8">
@@ -769,9 +944,9 @@ const App = (() => {
                     <img src="https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=1200&h=400&fit=crop" alt="AI Discovery" class="w-full h-full object-cover">
                     <div class="absolute inset-0 bg-gradient-to-r from-black/80 via-black/50 to-transparent flex items-center">
                         <div class="p-12">
-                            <h2 class="text-4xl font-bold mb-3">AI 发现：今日心情电台</h2>
-                            <p class="text-lg text-gray-300 mb-6">基于您的收听习惯，精选适合今日心情的音乐</p>
-                            <button class="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all font-medium">开始收听</button>
+                            <h2 class="text-4xl font-bold mb-3">AI Discovery: Today Mood Radio</h2>
+                            <p class="text-lg text-gray-300 mb-6">Curated music for today based on your listening habits</p>
+                            <button class="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all font-medium">Start Listening</button>
                         </div>
                     </div>
                 </div>
@@ -795,7 +970,7 @@ const App = (() => {
                     <h3 class="text-2xl font-bold mb-6">Browse by Mood</h3>
                     <div class="grid grid-cols-3 gap-4">
                         ${moods.map(mood => `
-                            <div class="mood-card bg-gradient-to-br ${mood.gradient}">
+                            <div class="mood-card bg-gradient-to-br ${mood.gradient}" data-mood="${mood.name}">
                                 <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                                 <h4 class="text-lg font-semibold">${mood.name}</h4>
                             </div>
@@ -818,11 +993,11 @@ const App = (() => {
             ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
             : tracks;
         const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
-            ? '正在读取已有歌单歌曲...'
-            : '暂无歌曲';
+            ? '姝ｅ湪璇诲彇宸叉湁姝屽崟姝屾洸...'
+            : '鏆傛棤姝屾洸';
         const emptyTrackHint = hasLocalLibraries
-            ? '点击重新扫描已保存的曲库路径'
-            : '点击后可以手动填写一个音频文件路径播放';
+            ? '鐐瑰嚮閲嶆柊鎵弿宸蹭繚瀛樼殑鏇插簱璺緞'
+            : 'Click to manually enter an audio file path to play';
 
         return `
             <div class="space-y-6">
@@ -885,8 +1060,8 @@ const App = (() => {
                             </div>
                         `).join('') : `
                             <button class="col-span-5 p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" data-empty-manual-play="true">
-                                <div class="text-lg font-medium mb-2">暂无歌曲</div>
-                                <div class="text-sm text-gray-400">点击后可以手动填写一个音频文件路径播放</div>
+                                <div class="text-lg font-medium mb-2">鏆傛棤姝屾洸</div>
+                                <div class="text-sm text-gray-400">Click to manually enter an audio file path to play</div>
                             </button>
                         `}
                     </div>
@@ -921,7 +1096,7 @@ const App = (() => {
     function renderSettings() {
         return `
             <div class="max-w-4xl mx-auto space-y-6">
-                <h1 class="text-3xl font-bold mb-8">Settings</h1>
+                <h1 class="text-3xl font-bold mb-8">设置</h1>
                 <div class="card">
                     <h2 class="text-xl font-semibold mb-6">应用主题与外观</h2>
                     <div class="space-y-6">
@@ -930,7 +1105,7 @@ const App = (() => {
                             <div class="flex gap-2">
                                 ${['light', 'dark', 'system'].map(t => `
                                     <button class="px-4 py-2 rounded-lg border ${settings.theme === t ? 'bg-purple-500/20 text-purple-400 border-purple-500' : 'border-white/10 text-gray-400 hover:bg-white/5'} transition-colors" data-theme="${t}">
-                                        ${t === 'light' ? '亮色' : t === 'dark' ? '暗色' : '跟随系统'}
+                                        ${t === 'light' ? '浅色' : t === 'dark' ? '深色' : '跟随系统'}
                                     </button>
                                 `).join('')}
                             </div>
@@ -952,8 +1127,8 @@ const App = (() => {
                     <div class="space-y-4">
                         <div class="flex items-center justify-between">
                             <div>
-                                <div class="font-medium">桌面歌词浮窗</div>
-                                <div class="text-sm text-gray-400">在桌面显示独立的歌词窗口</div>
+                                <div class="font-medium">桌面歌词</div>
+                                <div class="text-sm text-gray-400">在桌面上显示当前播放歌曲的同步歌词</div>
                             </div>
                             <label class="switch">
                                 <input type="checkbox" id="desktop-lyrics" ${settings.desktopLyrics ? 'checked' : ''}>
@@ -995,8 +1170,29 @@ const App = (() => {
                     </div>
                     <button id="rescan-btn" class="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 transition-colors">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                        立即重新扫描
+                        重新扫描音乐库
                     </button>
+                </div>
+                <div class="card">
+                    <h2 class="text-xl font-semibold mb-6">AI 服务</h2>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">接口地址</label>
+                            <input id="ai-base-url" type="text" value="${escapeHtml(aiConfig.baseUrl)}" class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-purple-500/50 transition-colors text-white">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">API 密钥</label>
+                            <input id="ai-api-key" type="password" value="${escapeHtml(aiConfig.apiKey)}" class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-purple-500/50 transition-colors text-white">
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">模型名称</label>
+                            <input id="ai-model" type="text" value="${escapeHtml(aiConfig.model)}" class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-purple-500/50 transition-colors text-white">
+                        </div>
+                        <div class="flex items-center justify-between pt-2">
+                            <div class="text-sm text-gray-400">兼容 DeepSeek、OpenAI 以及 OpenAI 风格的聊天接口。</div>
+                            <button id="save-ai-config-btn" class="px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 rounded-lg border border-purple-500/30 transition-colors">保存 AI 设置</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="card">
                     <h2 class="text-xl font-semibold mb-6">服务绑定状态</h2>
@@ -1026,7 +1222,7 @@ const App = (() => {
                                     </div>
                                 </div>
                             </div>
-                            <button class="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded-lg border border-red-500/30 transition-colors text-red-400">注销</button>
+                            <button class="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded-lg border border-red-500/30 transition-colors text-red-400">解绑</button>
                         </div>
                     </div>
                 </div>
@@ -1034,7 +1230,6 @@ const App = (() => {
             </div>
         `;
     }
-
     function renderPlayerBar() {
         return `
             <div class="player-bar px-6 flex items-center gap-6 text-white">
@@ -1052,7 +1247,7 @@ const App = (() => {
                 </div>
                 <div class="flex-1 flex flex-col items-center gap-2">
                     <div class="flex items-center gap-4">
-                        <button id="previous-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="上一首">
+                        <button id="previous-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="Previous">
                             <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
                         </button>
                         <button id="play-pause-btn" class="play-button">
@@ -1061,7 +1256,7 @@ const App = (() => {
                                 '<svg class="w-6 h-6 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'
                             }
                         </button>
-                        <button id="next-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="下一首">
+                        <button id="next-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="Next">
                             <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
                         </button>
                     </div>
@@ -1072,7 +1267,7 @@ const App = (() => {
                     </div>
                 </div>
                 <div class="flex items-center gap-4 w-80 justify-end">
-                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="播放模式">
+                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="鎾斁妯″紡">
                         <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
                         <span>${getPlaybackStrategyLabel()}</span>
                     </button>
@@ -1104,9 +1299,9 @@ const App = (() => {
         const chatInput = document.getElementById('chat-input');
         const sendBtn = document.getElementById('send-btn');
         if (chatInput && sendBtn) {
-            sendBtn.addEventListener('click', sendMessage);
+            sendBtn.addEventListener('click', sendAIMessage);
             chatInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') sendMessage();
+                if (e.key === 'Enter') sendAIMessage();
             });
         }
 
@@ -1170,10 +1365,34 @@ const App = (() => {
             });
         }
 
+        const saveAIConfigBtn = document.getElementById('save-ai-config-btn');
+        if (saveAIConfigBtn) {
+            saveAIConfigBtn.addEventListener('click', () => {
+                aiConfig.baseUrl = document.getElementById('ai-base-url')?.value.trim() || aiConfig.baseUrl;
+                aiConfig.apiKey = document.getElementById('ai-api-key')?.value.trim() || '';
+                aiConfig.model = document.getElementById('ai-model')?.value.trim() || aiConfig.model;
+                saveAIConfig();
+                aiState.error = null;
+                alert('AI 设置已保存。');
+            });
+        }
+
+        document.querySelectorAll('[data-mood]').forEach(card => {
+            card.addEventListener('click', () => {
+                currentView = 'ai-recommend';
+                render();
+                const input = document.getElementById('chat-input');
+                if (input) {
+                    input.value = `Recommend ${card.dataset.mood} music`;
+                    sendAIMessage();
+                }
+            });
+        });
+
         const addPathBtn = document.getElementById('add-path-btn');
         if (addPathBtn) {
             addPathBtn.addEventListener('click', () => {
-                const path = prompt('请输入音乐文件夹路径:');
+                const path = prompt('请输入音乐文件夹路径：');
                 const normalizedPath = path ? path.trim() : '';
                 if (normalizedPath) {
                     sendToCSharp('addLocalPath', JSON.stringify({ Path: normalizedPath }));
@@ -1263,6 +1482,45 @@ const App = (() => {
         }
     }
 
+    async function sendAIMessage() {
+        const input = document.getElementById('chat-input');
+        if (!input || !input.value.trim() || aiState.isLoading) return;
+        const content = input.value.trim();
+
+        const newMessage = {
+            id: Date.now().toString(),
+            type: 'user',
+            content,
+            timestamp: new Date()
+        };
+        messages.push(newMessage);
+        input.value = '';
+        aiState = { isLoading: true, error: null };
+        aiRecommendedTracks = recommendLocalTracks(content);
+        render();
+
+        try {
+            const responseText = await requestAIMessage(content);
+            messages.push({
+                id: (Date.now() + 1).toString(),
+                type: 'ai',
+                content: responseText,
+                timestamp: new Date()
+            });
+        } catch (error) {
+            messages.push({
+                id: (Date.now() + 1).toString(),
+                type: 'ai',
+                content: buildLocalRecommendationText(content, aiRecommendedTracks),
+                timestamp: new Date()
+            });
+            aiState.error = error instanceof Error ? error.message : 'AI service is unavailable.';
+        } finally {
+            aiState.isLoading = false;
+            render();
+        }
+    }
+
     function sendMessage() {
         const input = document.getElementById('chat-input');
         if (!input || !input.value.trim()) return;
@@ -1281,7 +1539,7 @@ const App = (() => {
             const aiResponse = {
                 id: (Date.now() + 1).toString(),
                 type: 'ai',
-                content: '好的，让我为您推荐符合您心情的音乐...',
+                content: 'Okay, let me recommend music that fits your mood...',
                 timestamp: new Date()
             };
             messages.push(aiResponse);
