@@ -682,6 +682,23 @@ const App = (() => {
         return tracks.findIndex(track => normalizePathForCompare(track.filePath || track.sourceUri) === target);
     }
 
+    function getCurrentPlaylistTracks() {
+        if (!selectedPlaylist?.isLocal) return tracks;
+
+        const playlistPath = normalizePathForCompare(selectedPlaylist.path);
+        return tracks.filter(track => {
+            const trackPath = normalizePathForCompare(track.filePath || track.sourceUri);
+            return playlistPath && trackPath.startsWith(playlistPath);
+        });
+    }
+
+    function findCurrentPlaylistTrackIndexByPath(filePath) {
+        const target = normalizePathForCompare(filePath);
+        return getCurrentPlaylistTracks().findIndex(track => {
+            return normalizePathForCompare(track.filePath || track.sourceUri) === target;
+        });
+    }
+
     function selectPlaylistForTrack(filePath) {
         const target = normalizePathForCompare(filePath);
         const playlist = getLibraryPlaylists()
@@ -698,7 +715,8 @@ const App = (() => {
             hasAutoRestoredPlayback = true;
             pendingRestoreTime = Math.max(0, Number(settings.lastPlaybackTime) || 0);
             selectPlaylistForTrack(settings.lastTrackPath);
-            playTrackFromQueue(trackIndex, { skipSave: true });
+            const playlistTrackIndex = findCurrentPlaylistTrackIndexByPath(settings.lastTrackPath);
+            playTrackFromQueue(playlistTrackIndex >= 0 ? playlistTrackIndex : 0, { skipSave: true });
             return;
         }
 
@@ -779,14 +797,15 @@ const App = (() => {
     }
 
     function getPlayableQueue() {
-        return tracks
+        return getCurrentPlaylistTracks()
             .map(toQueueTrack)
             .filter(track => Boolean(track.sourceUri));
     }
 
     function playTrackFromQueue(index, options = {}) {
+        const playlistTracks = getCurrentPlaylistTracks();
         const queue = getPlayableQueue();
-        const selected = tracks[index];
+        const selected = playlistTracks[index];
         if (!selected) return;
 
         if (queue.length > 0 && (selected.filePath || selected.sourceUri)) {
@@ -1099,9 +1118,7 @@ const App = (() => {
         const libraryPlaylists = getLibraryPlaylists();
         const hasLocalLibraries = libraryPlaylists.length > 0;
         const trackListTitle = selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks';
-        const visibleTracks = selectedPlaylist?.isLocal
-            ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
-            : tracks;
+        const visibleTracks = getCurrentPlaylistTracks();
         const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
             ? '正在读取已有歌单歌曲...'
             : '暂无歌曲';
@@ -1180,7 +1197,7 @@ const App = (() => {
                     <h3 class="text-xl font-semibold mb-6">${trackListTitle}</h3>
                     <div class="space-y-2">
                         ${visibleTracks.length > 0 ? visibleTracks.map((track, index) => `
-                            <div class="track-row group" data-track-index="${tracks.indexOf(track)}">
+                            <div class="track-row group" data-track-index="${index}">
                                 <div class="w-8 text-gray-400 text-sm">${index + 1}</div>
                                 <div class="track-play">
                                     <svg class="w-4 h-4 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
