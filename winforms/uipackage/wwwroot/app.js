@@ -19,6 +19,8 @@ const App = (() => {
     let selectedPlaylist = null;
     let hasAutoScannedLocalPaths = false;
     let isScanningLocalPaths = false;
+    let hasLoadedLocalPaths = false;
+    let pendingScanCount = 0;
     let loadedLyricsFilePath = '';
     let lastActiveLyricIndex = -1;
     let listeningBufferSeconds = 0;
@@ -86,9 +88,11 @@ const App = (() => {
                 break;
             case 'getLocalPaths':
                 localPaths = normalizeLocalPaths(JSON.parse(data));
+                hasLoadedLocalPaths = true;
                 syncTracksWithLocalPaths();
                 syncSelectedPlaylistWithLocalPaths();
                 autoScanLocalPaths();
+                tryAutoRestorePlayback();
                 render();
                 break;
             case 'addLocalPath':
@@ -178,7 +182,9 @@ const App = (() => {
     function applyScanFolderResponse(data) {
         const scanData = parseJsonData(data);
         if (!scanData || !Array.isArray(scanData.files)) {
-            isScanningLocalPaths = false;
+            pendingScanCount = Math.max(0, pendingScanCount - 1);
+            isScanningLocalPaths = pendingScanCount > 0;
+            tryAutoRestorePlayback();
             alert(`Scan failed: ${data}`);
             return;
         }
@@ -216,7 +222,9 @@ const App = (() => {
                 tracks.push(track);
             }
         });
-        isScanningLocalPaths = false;
+        pendingScanCount = Math.max(0, pendingScanCount - 1);
+        isScanningLocalPaths = pendingScanCount > 0;
+        tryAutoRestorePlayback();
 
         if (scannedTracks.length === 0) {
             alert('Scan completed, but no supported audio files were found in this folder.');
@@ -325,12 +333,14 @@ const App = (() => {
     function scanAllLocalPaths() {
         if (localPaths.length === 0) return;
 
+        const pathsToScan = localPaths.filter(path => path.path);
+        if (pathsToScan.length === 0) return;
+
         isScanningLocalPaths = true;
+        pendingScanCount = pathsToScan.length;
         render();
-        localPaths.forEach(path => {
-            if (path.path) {
-                sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
-            }
+        pathsToScan.forEach(path => {
+            sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
         });
     }
 
@@ -663,8 +673,36 @@ const App = (() => {
         document.body.classList.toggle('theme-dark', settings.theme === 'dark');
     }
 
+    function normalizePathForCompare(filePath) {
+        return String(filePath || '').replace(/\\/g, '/').toLowerCase();
+    }
+
+    function findTrackIndexByPath(filePath) {
+        const target = normalizePathForCompare(filePath);
+        return tracks.findIndex(track => normalizePathForCompare(track.filePath || track.sourceUri) === target);
+    }
+
+    function selectPlaylistForTrack(filePath) {
+        const target = normalizePathForCompare(filePath);
+        const playlist = getLibraryPlaylists()
+            .find(item => item.path && target.startsWith(normalizePathForCompare(item.path)));
+        if (playlist) selectedPlaylist = playlist;
+    }
+
     function tryAutoRestorePlayback() {
         if (hasAutoRestoredPlayback || !settings.autoPlay || !settings.lastTrackPath) return;
+        if (!hasLoadedLocalPaths) return;
+
+        const trackIndex = findTrackIndexByPath(settings.lastTrackPath);
+        if (trackIndex >= 0) {
+            hasAutoRestoredPlayback = true;
+            pendingRestoreTime = Math.max(0, Number(settings.lastPlaybackTime) || 0);
+            selectPlaylistForTrack(settings.lastTrackPath);
+            playTrackFromQueue(trackIndex, { skipSave: true });
+            return;
+        }
+
+        if (localPaths.length > 0 && (isScanningLocalPaths || pendingScanCount > 0)) return;
 
         hasAutoRestoredPlayback = true;
         pendingRestoreTime = Math.max(0, Number(settings.lastPlaybackTime) || 0);
@@ -746,7 +784,7 @@ const App = (() => {
             .filter(track => Boolean(track.sourceUri));
     }
 
-    function playTrackFromQueue(index) {
+    function playTrackFromQueue(index, options = {}) {
         const queue = getPlayableQueue();
         const selected = tracks[index];
         if (!selected) return;
@@ -762,7 +800,7 @@ const App = (() => {
             isPlaying = true;
 
             requestLyricsForFile(track.sourceUri);
-            savePlaybackState(0, true);
+            if (!options.skipSave) savePlaybackState(0, true);
             sendToCSharp('setQueue', JSON.stringify({ tracks: queue, startIndex }));
             sendToCSharp('play', JSON.stringify({ filePath: track.sourceUri }));
             renderPlayer();
@@ -783,9 +821,9 @@ const App = (() => {
     }
 
     function getPlaybackStrategyLabel() {
-        if (playbackStrategy === 'shuffle') return '闅忔満';
-        if (playbackStrategy === 'repeat') return '寰幆';
-        return '椤哄簭';
+        if (playbackStrategy === 'shuffle') return '随机';
+        if (playbackStrategy === 'repeat') return '循环';
+        return '顺序';
     }
 
     function promptAndPlayFile() {
@@ -1065,10 +1103,10 @@ const App = (() => {
             ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
             : tracks;
         const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
-            ? '姝ｅ湪璇诲彇宸叉湁姝屽崟姝屾洸...'
-            : '鏆傛棤姝屾洸';
+            ? '正在读取已有歌单歌曲...'
+            : '暂无歌曲';
         const emptyTrackHint = hasLocalLibraries
-            ? '鐐瑰嚮閲嶆柊鎵弿宸蹭繚瀛樼殑鏇插簱璺緞'
+            ? '点击重新扫描已保存的曲库路径'
             : 'Click to manually enter an audio file path to play';
 
         return `
@@ -1132,7 +1170,7 @@ const App = (() => {
                             </div>
                         `).join('') : `
                             <button class="col-span-5 p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" data-empty-manual-play="true">
-                                <div class="text-lg font-medium mb-2">鏆傛棤姝屾洸</div>
+                                <div class="text-lg font-medium mb-2">暂无歌曲</div>
                                 <div class="text-sm text-gray-400">Click to manually enter an audio file path to play</div>
                             </button>
                         `}
@@ -1339,7 +1377,7 @@ const App = (() => {
                     </div>
                 </div>
                 <div class="flex items-center gap-4 w-80 justify-end">
-                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="鎾斁妯″紡">
+                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="播放模式">
                         <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
                         <span>${getPlaybackStrategyLabel()}</span>
                     </button>
