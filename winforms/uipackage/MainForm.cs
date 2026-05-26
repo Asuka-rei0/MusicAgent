@@ -10,6 +10,7 @@ public class MainForm : Form
     private AudioService audioService = null!;
     private DatabaseService dbService = null!;
     private FileService fileService = null!;
+    private NeteaseService neteaseService = null!;
     private readonly JsonSerializerOptions jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public MainForm()
@@ -39,9 +40,10 @@ public class MainForm : Form
 
     private void InitializeServices()
     {
-        audioService = new AudioService();
         dbService = new DatabaseService();
         fileService = new FileService();
+        neteaseService = NeteaseService.Create();
+        audioService = new AudioService(neteaseService);
     }
 
     private void WebView_CoreWebView2InitializationCompleted(object? sender, CoreWebView2InitializationCompletedEventArgs e)
@@ -57,7 +59,7 @@ public class MainForm : Form
         }
     }
 
-    private void CoreWebView2_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    private async void CoreWebView2_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         try
         {
@@ -65,7 +67,7 @@ public class MainForm : Form
             var request = JsonSerializer.Deserialize<WebMessageRequest>(message, jsonOptions);
             if (request == null) return;
 
-            var response = HandleRequest(request);
+            var response = await HandleRequestAsync(request);
             var responseJson = JsonSerializer.Serialize(response);
             webView.CoreWebView2?.PostWebMessageAsString(responseJson);
         }
@@ -81,35 +83,74 @@ public class MainForm : Form
         }
     }
 
-    private WebMessageResponse HandleRequest(WebMessageRequest request)
+    private async Task<WebMessageResponse> HandleRequestAsync(WebMessageRequest request)
     {
+        var id = request.Id;
         return request.Action switch
         {
-            "play" => audioService.Play(request.Data),
-            "pause" => audioService.Pause(),
-            "resume" => audioService.Resume(),
-            "stop" => audioService.Stop(),
-            "next" => audioService.Next(),
-            "previous" => audioService.Previous(),
-            "setQueue" => audioService.SetQueue(request.Data),
-            "setPlaybackStrategy" => audioService.SetPlaybackStrategy(request.Data),
-            "setVolume" => audioService.SetVolume(request.Data),
-            "setProgress" => audioService.SetProgress(request.Data),
-            "getProgress" => audioService.GetProgress(),
-            "getAudioState" => audioService.GetState(),
-            "scanFolder" => fileService.ScanFolder(request.Data),
-            "getLocalPaths" => fileService.GetLocalPaths(),
-            "addLocalPath" => fileService.AddLocalPath(request.Data),
-            "removeLocalPath" => fileService.RemoveLocalPath(request.Data),
-            "getLyrics" => fileService.GetLyrics(request.Data),
-            "getSettings" => dbService.GetSettings(),
-            "saveSettings" => dbService.SaveSettings(request.Data),
-            "savePlaybackState" => dbService.SavePlaybackState(request.Data),
-            "getWeeklyData" => dbService.GetWeeklyData(),
-            "getPlatformData" => dbService.GetPlatformData(),
-            "recordListeningTime" => dbService.RecordListeningTime(request.Data),
-            _ => new WebMessageResponse { Id = request.Id, Action = request.Action, Data = "Unknown action" }
+            "neteaseQrStart" => await neteaseService.StartQrLoginAsync(id),
+            "neteaseQrCheck" => await neteaseService.CheckQrLoginAsync(id),
+            "syncNetease" => await neteaseService.SyncAsync(id),
+            "play" => WithId(await audioService.PlayAsync(request.Data), id),
+            "pause" => WithId(audioService.Pause(), id),
+            "resume" => WithId(audioService.Resume(), id),
+            "stop" => WithId(audioService.Stop(), id),
+            "next" => WithId(await audioService.NextAsync(), id),
+            "previous" => WithId(await audioService.PreviousAsync(), id),
+            "setQueue" => WithId(await audioService.SetQueueAsync(request.Data), id),
+            "setPlaybackStrategy" => WithId(audioService.SetPlaybackStrategy(request.Data), id),
+            "setVolume" => WithId(audioService.SetVolume(request.Data), id),
+            "setProgress" => WithId(audioService.SetProgress(request.Data), id),
+            "getProgress" => WithId(audioService.GetProgress(), id),
+            "getAudioState" => WithId(audioService.GetState(), id),
+            "scanFolder" => WithId(fileService.ScanFolder(request.Data), id),
+            "getLocalPaths" => WithId(fileService.GetLocalPaths(), id),
+            "addLocalPath" => WithId(fileService.AddLocalPath(request.Data), id),
+            "removeLocalPath" => WithId(fileService.RemoveLocalPath(request.Data), id),
+            "getLyrics" => WithId(await GetLyricsAsync(request.Data), id),
+            "getSettings" => WithId(dbService.GetSettings(), id),
+            "saveSettings" => WithId(dbService.SaveSettings(request.Data), id),
+            "savePlaybackState" => WithId(dbService.SavePlaybackState(request.Data), id),
+            "getWeeklyData" => WithId(dbService.GetWeeklyData(), id),
+            "getPlatformData" => WithId(dbService.GetPlatformData(), id),
+            "recordListeningTime" => WithId(dbService.RecordListeningTime(request.Data), id),
+            "getNeteaseStatus" => neteaseService.GetStatus(id),
+            "setNeteaseApiBaseUrl" => neteaseService.SetApiBaseUrl(request.Data, id),
+            "neteaseLogout" => neteaseService.Logout(id),
+            "getNeteasePlaylists" => neteaseService.GetPlaylists(id),
+            "getNeteasePlaylistTracks" => await neteaseService.GetPlaylistTracksAsync(request.Data, id),
+            _ => new WebMessageResponse { Id = id, Action = request.Action, Data = "Unknown action" }
         };
+    }
+
+    private async Task<WebMessageResponse> GetLyricsAsync(string data)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(data);
+            if (!doc.RootElement.TryGetProperty("filePath", out var pathProp))
+            {
+                return fileService.GetLyrics(data);
+            }
+
+            var path = pathProp.GetString() ?? string.Empty;
+            if (NeteaseService.TryParseNeteaseSource(path, out var songId))
+            {
+                return await neteaseService.GetLyricsAsync(path, songId);
+            }
+
+            return fileService.GetLyrics(data);
+        }
+        catch
+        {
+            return fileService.GetLyrics(data);
+        }
+    }
+
+    private static WebMessageResponse WithId(WebMessageResponse response, string id)
+    {
+        response.Id = id;
+        return response;
     }
 }
 

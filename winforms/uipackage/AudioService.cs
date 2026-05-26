@@ -8,47 +8,47 @@ namespace MusicAgentWinForms;
 public class AudioService
 {
     private readonly NAudioAudioService audioCore = new();
+    private readonly NeteaseService? neteaseService;
     private readonly JsonSerializerOptions jsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private readonly List<QueuedTrackInfo> queueManifest = new();
     private string playbackStrategy = "normal";
-    private string? currentFilePath;
+    private int manifestIndex = -1;
+    private string? currentLogicalSource;
+    private string? currentCoverUrl;
 
-    public WebMessageResponse Play(string data)
+    public AudioService(NeteaseService? neteaseService = null)
+    {
+        this.neteaseService = neteaseService;
+    }
+
+    public async Task<WebMessageResponse> PlayAsync(string data)
     {
         try
         {
             var request = JsonSerializer.Deserialize<PlayRequest>(data, jsonOptions);
-            if (request == null || string.IsNullOrEmpty(request.FilePath))
+            if (request == null || string.IsNullOrWhiteSpace(request.FilePath))
             {
                 return CreateStateResponse("play", "Invalid file path.");
             }
 
-            if (!File.Exists(request.FilePath))
+            if (queueManifest.Count > 0)
             {
-                return CreateStateResponse("play", "File not found.");
-            }
-
-            currentFilePath = request.FilePath;
-
-            if (audioCore.GetQueue().Count == 0)
-            {
-                audioCore.SetQueue(new[]
+                var index = queueManifest.FindIndex(track =>
+                    track.SourceUri.Equals(request.FilePath, StringComparison.OrdinalIgnoreCase));
+                if (index < 0)
                 {
-                    new PlaybackTrack
-                    {
-                        Id = request.FilePath,
-                        SourceUri = request.FilePath,
-                        Title = Path.GetFileNameWithoutExtension(request.FilePath),
-                        Artist = "Local file"
-                    }
-                });
-            }
-            else if (audioCore.GetState().SourceUri != request.FilePath)
-            {
-                audioCore.LoadMedia(request.FilePath, request.FilePath);
+                    index = manifestIndex >= 0 ? manifestIndex : 0;
+                }
+
+                return await PlayManifestAtAsync(index, "play");
             }
 
-            audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Play));
-            return CreateStateResponse("play");
+            return await PlaySingleAsync(
+                request.FilePath,
+                request.Title,
+                request.Artist,
+                request.CoverUrl,
+                "play");
         }
         catch (Exception ex)
         {
@@ -85,17 +85,32 @@ public class AudioService
     public WebMessageResponse Stop()
     {
         audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Stop));
-        currentFilePath = null;
+        queueManifest.Clear();
+        manifestIndex = -1;
+        currentLogicalSource = null;
+        currentCoverUrl = null;
         return CreateStateResponse("stop");
     }
 
-    public WebMessageResponse Next()
+    public async Task<WebMessageResponse> NextAsync()
     {
         try
         {
-            audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Next));
-            currentFilePath = audioCore.GetState().SourceUri;
-            return CreateStateResponse("next");
+            if (queueManifest.Count == 0)
+            {
+                audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Next));
+                SyncFromAudioCore();
+                return CreateStateResponse("next");
+            }
+
+            var nextIndex = playbackStrategy switch
+            {
+                "shuffle" => new Random().Next(queueManifest.Count),
+                "repeat" => manifestIndex,
+                _ => (manifestIndex + 1) % queueManifest.Count
+            };
+
+            return await PlayManifestAtAsync(nextIndex, "next");
         }
         catch (Exception ex)
         {
@@ -103,13 +118,19 @@ public class AudioService
         }
     }
 
-    public WebMessageResponse Previous()
+    public async Task<WebMessageResponse> PreviousAsync()
     {
         try
         {
-            audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Previous));
-            currentFilePath = audioCore.GetState().SourceUri;
-            return CreateStateResponse("previous");
+            if (queueManifest.Count == 0)
+            {
+                audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Previous));
+                SyncFromAudioCore();
+                return CreateStateResponse("previous");
+            }
+
+            var previousIndex = manifestIndex <= 0 ? queueManifest.Count - 1 : manifestIndex - 1;
+            return await PlayManifestAtAsync(previousIndex, "previous");
         }
         catch (Exception ex)
         {
@@ -117,37 +138,40 @@ public class AudioService
         }
     }
 
-    public WebMessageResponse SetQueue(string data)
+    public async Task<WebMessageResponse> SetQueueAsync(string data)
     {
         try
         {
             var request = JsonSerializer.Deserialize<SetQueueRequest>(data, jsonOptions);
-            var tracks = request?.Tracks?
-                .Where(track => !string.IsNullOrWhiteSpace(track.SourceUri) && File.Exists(track.SourceUri))
-                .Select((track, index) => new PlaybackTrack
+            queueManifest.Clear();
+
+            foreach (var track in request?.Tracks ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(track.SourceUri)) continue;
+
+                queueManifest.Add(new QueuedTrackInfo
                 {
                     Id = string.IsNullOrWhiteSpace(track.Id) ? track.SourceUri : track.Id,
                     SourceUri = track.SourceUri,
                     Title = track.Title,
                     Artist = track.Artist,
+                    CoverUrl = track.CoverUrl ?? "",
                     DurationMs = track.DurationMs
-                })
-                .ToList() ?? new List<PlaybackTrack>();
-
-            if (tracks.Count == 0)
-            {
-                return CreateStateResponse("setQueue", "No playable local files in the queue.");
+                });
             }
 
-            var startIndex = Math.Clamp(request?.StartIndex ?? 0, 0, tracks.Count - 1);
-            audioCore.ExecuteCommand(new PlayCommand
+            if (queueManifest.Count == 0)
             {
-                Type = PlayCommandType.SetQueue,
-                Queue = tracks,
-                StartIndex = startIndex
-            });
+                return CreateStateResponse("setQueue", "No playable tracks in the queue.");
+            }
 
-            currentFilePath = audioCore.GetState().SourceUri;
+            var startIndex = Math.Clamp(request?.StartIndex ?? 0, 0, queueManifest.Count - 1);
+            if (request?.AutoPlay == true)
+            {
+                return await PlayManifestAtAsync(startIndex, "setQueue");
+            }
+
+            manifestIndex = startIndex;
             return CreateStateResponse("setQueue");
         }
         catch (Exception ex)
@@ -233,7 +257,7 @@ public class AudioService
         try
         {
             audioCore.RefreshState();
-            currentFilePath = audioCore.GetState().SourceUri;
+            SyncFromAudioCore();
             return CreateStateResponse("getProgress");
         }
         catch (Exception ex)
@@ -245,8 +269,97 @@ public class AudioService
     public WebMessageResponse GetState()
     {
         audioCore.RefreshState();
-        currentFilePath = audioCore.GetState().SourceUri;
+        SyncFromAudioCore();
         return CreateStateResponse("getAudioState");
+    }
+
+    private async Task<WebMessageResponse> PlayManifestAtAsync(int index, string action)
+    {
+        if (index < 0 || index >= queueManifest.Count)
+        {
+            return CreateStateResponse(action, "Track index out of range.");
+        }
+
+        var track = queueManifest[index];
+        return await PlaySingleAsync(
+            track.SourceUri,
+            track.Title,
+            track.Artist,
+            track.CoverUrl,
+            action,
+            manifestIndex: index);
+    }
+
+    private async Task<WebMessageResponse> PlaySingleAsync(
+        string sourceUri,
+        string title,
+        string artist,
+        string? coverUrl,
+        string action,
+        int? manifestIndex = null)
+    {
+        var resolvedPath = await ResolveSourceAsync(sourceUri);
+        if (string.IsNullOrWhiteSpace(resolvedPath) || !File.Exists(resolvedPath))
+        {
+            return CreateStateResponse(action, "File not found or unable to resolve stream.");
+        }
+
+        if (manifestIndex.HasValue)
+        {
+            this.manifestIndex = manifestIndex.Value;
+        }
+        else
+        {
+            queueManifest.Clear();
+            this.manifestIndex = -1;
+        }
+
+        currentLogicalSource = sourceUri;
+        currentCoverUrl = coverUrl ?? "";
+
+        var displayTitle = string.IsNullOrWhiteSpace(title)
+            ? Path.GetFileNameWithoutExtension(resolvedPath)
+            : title;
+        var displayArtist = string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist;
+
+        audioCore.SetQueue(new[]
+        {
+            new PlaybackTrack
+            {
+                Id = sourceUri,
+                SourceUri = resolvedPath,
+                Title = displayTitle,
+                Artist = displayArtist,
+                DurationMs = manifestIndex.HasValue ? queueManifest[manifestIndex.Value].DurationMs : null
+            }
+        });
+
+        audioCore.ExecuteCommand(PlayCommand.Create(PlayCommandType.Play));
+        return CreateStateResponse(action);
+    }
+
+    private void SyncFromAudioCore()
+    {
+        var state = audioCore.GetState();
+        if (!string.IsNullOrWhiteSpace(state.SourceUri))
+        {
+            currentLogicalSource = state.TrackId ?? currentLogicalSource;
+        }
+    }
+
+    private async Task<string> ResolveSourceAsync(string source)
+    {
+        if (File.Exists(source))
+        {
+            return source;
+        }
+
+        if (neteaseService != null && NeteaseService.TryParseNeteaseSource(source, out var songId))
+        {
+            return await neteaseService.ResolveSongToLocalPathAsync(songId);
+        }
+
+        return source;
     }
 
     private WebMessageResponse CreateStateResponse(string action, string? errorMessage = null)
@@ -265,36 +378,56 @@ public class AudioService
         var currentTrack = queue.FirstOrDefault(track => track.Id == state.TrackId)
             ?? queue.FirstOrDefault(track => track.SourceUri == state.SourceUri);
 
+        var manifestTrack = manifestIndex >= 0 && manifestIndex < queueManifest.Count
+            ? queueManifest[manifestIndex]
+            : null;
+
         return new
         {
-            filePath = state.SourceUri ?? currentFilePath,
-            trackId = state.TrackId,
-            sourceUri = state.SourceUri,
-            title = currentTrack?.Title,
-            artist = currentTrack?.Artist,
+            filePath = state.SourceUri,
+            logicalSourceUri = currentLogicalSource ?? manifestTrack?.SourceUri ?? state.TrackId,
+            trackId = currentLogicalSource ?? state.TrackId,
+            sourceUri = currentLogicalSource ?? state.SourceUri,
+            title = manifestTrack?.Title ?? currentTrack?.Title,
+            artist = manifestTrack?.Artist ?? currentTrack?.Artist,
+            coverUrl = !string.IsNullOrWhiteSpace(currentCoverUrl) ? currentCoverUrl : manifestTrack?.CoverUrl,
             status = state.Status.ToString(),
             progress,
             currentTime = state.CurrentMs / 1000,
             duration = state.DurationMs / 1000,
             volume = Math.Round(state.Volume * 100),
             isPlaying = state.Status == PlaybackStatus.Playing,
-            currentIndex = audioCore.GetCurrentIndex(),
-            queueCount = queue.Count,
+            currentIndex = manifestIndex >= 0 ? manifestIndex : audioCore.GetCurrentIndex(),
+            queueCount = queueManifest.Count > 0 ? queueManifest.Count : queue.Count,
             playbackStrategy,
             errorMessage = errorMessage ?? state.ErrorMessage
         };
+    }
+
+    private sealed class QueuedTrackInfo
+    {
+        public string Id { get; init; } = string.Empty;
+        public string SourceUri { get; init; } = string.Empty;
+        public string Title { get; init; } = string.Empty;
+        public string Artist { get; init; } = string.Empty;
+        public string CoverUrl { get; init; } = string.Empty;
+        public double? DurationMs { get; init; }
     }
 }
 
 public class PlayRequest
 {
     public string FilePath { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string Artist { get; set; } = string.Empty;
+    public string CoverUrl { get; set; } = string.Empty;
 }
 
 public class SetQueueRequest
 {
     public List<QueueTrackRequest> Tracks { get; set; } = new();
     public int StartIndex { get; set; }
+    public bool AutoPlay { get; set; }
 }
 
 public class QueueTrackRequest
@@ -303,6 +436,7 @@ public class QueueTrackRequest
     public string Title { get; set; } = string.Empty;
     public string Artist { get; set; } = string.Empty;
     public string SourceUri { get; set; } = string.Empty;
+    public string CoverUrl { get; set; } = string.Empty;
     public double? DurationMs { get; set; }
 }
 

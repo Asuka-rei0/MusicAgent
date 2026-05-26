@@ -154,14 +154,24 @@ public class DatabaseService
             .Select(offset =>
             {
                 var date = since.AddDays(offset);
-                var seconds = history
-                    .Where(item => item.ListenedAt.Date == date.Date)
-                    .Sum(item => item.DurationSeconds);
+                var dayHistory = history.Where(item => item.ListenedAt.Date == date.Date).ToList();
+                var platforms = dayHistory
+                    .GroupBy(item => item.Platform)
+                    .Select(group => new WeeklyPlatformSlice
+                    {
+                        Name = FormatPlatformDisplayName(group.Key),
+                        Hours = Math.Round(group.Sum(item => item.DurationSeconds) / 3600.0, 2),
+                        Color = GetPlatformColor(group.Key)
+                    })
+                    .Where(slice => slice.Hours > 0)
+                    .OrderByDescending(slice => slice.Hours)
+                    .ToList();
 
                 return new WeeklyListeningData
                 {
                     Day = date.ToString("ddd"),
-                    Hours = Math.Round(seconds / 3600.0, 2)
+                    Hours = Math.Round(dayHistory.Sum(item => item.DurationSeconds) / 3600.0, 2),
+                    Platforms = platforms
                 };
             })
             .ToList();
@@ -175,7 +185,7 @@ public class DatabaseService
             .GroupBy(item => item.Platform)
             .Select(group => new PlatformListeningData
             {
-                Name = group.Key,
+                Name = FormatPlatformDisplayName(group.Key),
                 Value = Math.Round(group.Sum(item => item.DurationSeconds) / 3600.0, 2),
                 Color = GetPlatformColor(group.Key)
             })
@@ -213,15 +223,19 @@ public class DatabaseService
         }
     }
 
+    private static string FormatPlatformDisplayName(string platform) =>
+        platform.Equals("netease", StringComparison.OrdinalIgnoreCase) ? "网易云" : platform;
+
     private static string GetPlatformColor(string platform)
     {
         return platform.ToLowerInvariant() switch
         {
             "spotify" => "#F97316",
-            "netease" => "#D33A31",
+            "netease" or "netease cloud" => "#D33A31",
             "apple music" => "#EAB308",
             "qq music" => "#22C55E",
-            _ => "#8B5CF6"
+            "local" => "#8B5CF6",
+            _ => "#A855F7"
         };
     }
 }
@@ -232,12 +246,30 @@ public class MusicDbContext : DbContext
 
     public DbSet<AppSettings> Settings { get; set; }
     public DbSet<ListeningHistory> ListeningHistory { get; set; }
+    public DbSet<NeteaseSession> NeteaseSessions { get; set; } = null!;
+    public DbSet<NeteasePlaylist> NeteasePlaylists { get; set; } = null!;
+    public DbSet<NeteasePlaylistTrack> NeteasePlaylistTracks { get; set; } = null!;
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<NeteaseSession>().HasKey(s => s.Id);
+        modelBuilder.Entity<NeteasePlaylist>().HasIndex(p => p.ExternalId).IsUnique();
+        modelBuilder.Entity<NeteasePlaylistTrack>().HasIndex(t => new { t.PlaylistExternalId, t.SongId }).IsUnique();
+    }
 }
 
 public class WeeklyListeningData
 {
     public string Day { get; set; } = string.Empty;
     public double Hours { get; set; }
+    public List<WeeklyPlatformSlice> Platforms { get; set; } = new();
+}
+
+public class WeeklyPlatformSlice
+{
+    public string Name { get; set; } = string.Empty;
+    public double Hours { get; set; }
+    public string Color { get; set; } = string.Empty;
 }
 
 public class PlatformListeningData

@@ -8,6 +8,8 @@ const App = (() => {
     let currentFilePath = '';
     let currentTrackTitle = 'Unknown Track';
     let currentTrackArtist = 'Unknown Artist';
+    let currentCoverUrl = '';
+    let currentQueueIndex = -1;
     let playbackStrategy = 'normal';
     let isLiked = false;
     let messages = [];
@@ -19,14 +21,14 @@ const App = (() => {
     let selectedPlaylist = null;
     let hasAutoScannedLocalPaths = false;
     let isScanningLocalPaths = false;
-    let hasLoadedLocalPaths = false;
-    let pendingScanCount = 0;
-    let loadedLyricsFilePath = '';
+    let currentSourceUri = '';
+    let loadedLyricsKey = '';
     let lastActiveLyricIndex = -1;
     let listeningBufferSeconds = 0;
     let lastProgressFilePath = '';
     let lastProgressTime = 0;
     let lastProgressWasPlaying = false;
+    let hasLoadedLocalPaths = false;
     let hasAutoRestoredPlayback = false;
     let pendingRestoreTime = 0;
     let lastPlaybackStateSavedAt = 0;
@@ -34,6 +36,21 @@ const App = (() => {
     let aiConfig = loadAIConfig();
     let aiState = { isLoading: false, error: null };
     let aiRecommendedTracks = [];
+    let neteaseStatus = {
+        loggedIn: false,
+        nickname: '',
+        avatarUrl: '',
+        apiBaseUrl: 'http://127.0.0.1:3000',
+        lastSyncAt: null,
+        playlistCount: 0
+    };
+    let neteasePlaylists = [];
+    let neteaseTracks = [];
+    let neteaseQrImage = '';
+    let neteaseQrMessage = '';
+    let neteaseQrPollTimer = null;
+    let isNeteaseSyncing = false;
+    let isLoadingNeteaseTracks = false;
     const aiSystemPrompt = [
         'You are an AI music assistant for MusicAgent.',
         'Help users discover music based on mood, preferences, and listening habits.',
@@ -59,6 +76,11 @@ const App = (() => {
         applyTheme();
         render();
         startProgressTimer();
+        window.addEventListener('resize', () => {
+            if (currentView === 'ai-recommend') {
+                updateLyricsPadding();
+            }
+        });
     }
 
     function handleWebMessage(event) {
@@ -74,7 +96,12 @@ const App = (() => {
             case 'getWeeklyData':
                 weeklyData = JSON.parse(data).map(item => ({
                     day: item.day ?? item.Day,
-                    hours: Number(item.hours ?? item.Hours ?? 0)
+                    hours: Number(item.hours ?? item.Hours ?? 0),
+                    platforms: (item.platforms ?? item.Platforms ?? []).map(slice => ({
+                        name: slice.name ?? slice.Name,
+                        hours: Number(slice.hours ?? slice.Hours ?? 0),
+                        color: slice.color ?? slice.Color ?? '#8B5CF6'
+                    }))
                 }));
                 if (currentView === 'library') render();
                 break;
@@ -135,38 +162,229 @@ const App = (() => {
                 sendToCSharp('getWeeklyData');
                 sendToCSharp('getPlatformData');
                 break;
+            case 'getNeteaseStatus':
+                applyNeteaseStatus(data);
+                if (currentView === 'settings') {
+                    renderPreservingMainScroll();
+                } else if (currentView === 'library') {
+                    render();
+                }
+                break;
+            case 'setNeteaseApiBaseUrl':
+            case 'neteaseLogout':
+                applyNeteaseStatus(data);
+                if (!neteaseStatus.loggedIn) {
+                    neteasePlaylists = [];
+                    neteaseTracks = [];
+                }
+                render();
+                break;
+            case 'neteaseQrStart':
+                applyNeteaseQrStart(data);
+                break;
+            case 'neteaseQrCheck':
+                applyNeteaseQrCheck(data);
+                break;
+            case 'syncNetease':
+                applyNeteaseSync(data);
+                break;
+            case 'getNeteasePlaylists':
+                neteasePlaylists = parseJsonData(data) || [];
+                if (currentView === 'library') render();
+                break;
+            case 'getNeteasePlaylistTracks':
+                applyNeteasePlaylistTracks(data);
+                break;
         }
+    }
+
+    function applyNeteaseStatus(data) {
+        const payload = parseJsonData(data);
+        if (!payload || typeof payload !== 'object') return;
+        neteaseStatus = {
+            loggedIn: Boolean(payload.loggedIn),
+            userId: payload.userId ?? 0,
+            nickname: payload.nickname || '',
+            avatarUrl: payload.avatarUrl || '',
+            apiBaseUrl: payload.apiBaseUrl || neteaseStatus.apiBaseUrl,
+            lastSyncAt: payload.lastSyncAt || null,
+            playlistCount: Number(payload.playlistCount ?? 0)
+        };
+        if (neteaseStatus.loggedIn) {
+            sendToCSharp('getNeteasePlaylists');
+        }
+    }
+
+    function getMainScrollEl() {
+        return document.querySelector('.main-content');
+    }
+
+    function renderPreservingMainScroll() {
+        const scroller = getMainScrollEl();
+        const scrollTop = scroller?.scrollTop ?? 0;
+        render();
+        requestAnimationFrame(() => {
+            const el = getMainScrollEl();
+            if (el) el.scrollTop = scrollTop;
+        });
+    }
+
+    function updateNeteaseQrPanel() {
+        const panel = document.getElementById('netease-qr-panel');
+        const messageEl = document.getElementById('netease-qr-message');
+        const imageEl = document.getElementById('netease-qr-img');
+        if (!panel || !messageEl) {
+            if (currentView === 'settings' && neteaseQrImage) {
+                renderPreservingMainScroll();
+            }
+            return;
+        }
+
+        panel.classList.toggle('hidden', !neteaseQrImage);
+        messageEl.textContent = neteaseQrMessage || '请使用网易云音乐 App 扫描二维码';
+        if (imageEl && neteaseQrImage) {
+            imageEl.src = neteaseQrImage;
+        }
+    }
+
+    function applyNeteaseQrStart(data) {
+        const payload = parseJsonData(data);
+        if (payload?.errorMessage) {
+            alert(payload.errorMessage);
+            return;
+        }
+        neteaseQrImage = payload?.qrImage || '';
+        neteaseQrMessage = payload?.message || '请使用网易云音乐 App 扫描二维码';
+        stopNeteaseQrPoll();
+        renderPreservingMainScroll();
+        neteaseQrPollTimer = setInterval(() => sendToCSharp('neteaseQrCheck'), 2000);
+    }
+
+    function applyNeteaseQrCheck(data) {
+        const payload = parseJsonData(data);
+        if (!payload) return;
+
+        if (payload.errorMessage || payload.success === false) {
+            stopNeteaseQrPoll();
+            neteaseQrImage = '';
+            alert(payload.errorMessage || payload.message || '扫码登录失败');
+            renderPreservingMainScroll();
+            return;
+        }
+
+        neteaseQrMessage = payload.message || neteaseQrMessage;
+        if (payload.status === 'success') {
+            stopNeteaseQrPoll();
+            neteaseQrImage = '';
+            sendToCSharp('getNeteaseStatus');
+            const name = payload.profile?.nickname || '网易云用户';
+            alert(`网易云登录成功：${name}。可点击「同步歌单与听歌数据」。`);
+            renderPreservingMainScroll();
+            return;
+        }
+        if (payload.status === 'expired') {
+            stopNeteaseQrPoll();
+            neteaseQrImage = '';
+            updateNeteaseQrPanel();
+            alert(payload.message || '二维码已过期，请重新获取。');
+            return;
+        }
+        if (payload.status === 'waiting') {
+            updateNeteaseQrPanel();
+        }
+    }
+
+    function applyNeteaseSync(data) {
+        isNeteaseSyncing = false;
+        const payload = parseJsonData(data);
+        if (!payload?.success) {
+            alert(payload?.errorMessage || payload?.message || '同步失败');
+            render();
+            return;
+        }
+        neteaseStatus.lastSyncAt = payload.lastSyncAt || neteaseStatus.lastSyncAt;
+        neteaseStatus.playlistCount = Number(payload.playlistCount ?? neteaseStatus.playlistCount);
+        sendToCSharp('getNeteasePlaylists');
+        sendToCSharp('getWeeklyData');
+        sendToCSharp('getPlatformData');
+        alert(payload.message || '同步完成');
+        render();
+    }
+
+    function applyNeteasePlaylistTracks(data) {
+        isLoadingNeteaseTracks = false;
+        const payload = parseJsonData(data);
+        if (payload?.errorMessage) {
+            alert(payload.errorMessage);
+            render();
+            return;
+        }
+
+        neteaseTracks = Array.isArray(payload?.tracks) ? payload.tracks.map(normalizeTrack) : [];
+        if (neteaseTracks.length > 0 && !neteaseTracks.some(t => String(t.coverUrl || '').trim())) {
+            console.warn('曲目缺少封面，请在设置中重新「同步网易云」。');
+        }
+        render();
+
+        if (neteaseTracks.length === 0) {
+            alert(payload?.message || '该歌单暂无曲目，请重新同步网易云数据。');
+            return;
+        }
+
+        if (selectedPlaylist?.isNetease) {
+            playVisibleTrack(0);
+        }
+    }
+
+    function stopNeteaseQrPoll() {
+        if (neteaseQrPollTimer) {
+            clearInterval(neteaseQrPollTimer);
+            neteaseQrPollTimer = null;
+        }
+    }
+
+    function formatPlatformName(name) {
+        if (!name) return name;
+        const key = String(name).toLowerCase();
+        if (key === 'netease') return '网易云';
+        return name;
     }
 
     function applyAudioState(data) {
         const progressData = parseJsonData(data);
         if (!progressData || typeof progressData !== 'object') return;
 
-        const previousFilePath = currentFilePath;
+        const previousSourceUri = currentSourceUri;
         const nextFilePath = progressData.filePath || currentFilePath;
-        updateListeningStats(nextFilePath, Number(progressData.currentTime ?? currentTime) || 0, Boolean(progressData.isPlaying));
+        const statsPath = progressData.logicalSourceUri || progressData.trackId || progressData.sourceUri || nextFilePath;
+        updateListeningStats(statsPath, Number(progressData.currentTime ?? currentTime) || 0, Boolean(progressData.isPlaying));
 
         progress = Number(progressData.progress ?? progress) || 0;
         currentTime = Number(progressData.currentTime ?? currentTime) || 0;
         duration = Number(progressData.duration ?? duration) || duration;
         volume = Number(progressData.volume ?? volume) || volume;
         isPlaying = Boolean(progressData.isPlaying);
-        currentFilePath = progressData.filePath || currentFilePath;
-        currentTrackTitle = progressData.title || getFileNameWithoutExtension(currentFilePath) || currentTrackTitle;
+        currentFilePath = nextFilePath;
+        currentSourceUri = statsPath;
+        currentTrackTitle = progressData.title || getFileNameWithoutExtension(statsPath) || currentTrackTitle;
         currentTrackArtist = progressData.artist || currentTrackArtist || 'Unknown Artist';
+        currentCoverUrl = progressData.coverUrl || currentCoverUrl || '';
+        currentQueueIndex = Number.isFinite(Number(progressData.currentIndex))
+            ? Number(progressData.currentIndex)
+            : currentQueueIndex;
         playbackStrategy = progressData.playbackStrategy || playbackStrategy;
 
         if (progressData.errorMessage) {
             console.warn('AudioCore error:', progressData.errorMessage);
         }
 
-        if (currentFilePath && currentFilePath !== previousFilePath) {
-            requestLyricsForFile(currentFilePath);
+        if (currentSourceUri && currentSourceUri !== previousSourceUri) {
+            requestLyricsForSource(currentSourceUri);
         }
 
         syncLyricHighlight();
 
-        if (currentFilePath && currentFilePath !== previousFilePath) {
+        if (currentSourceUri && currentSourceUri !== previousSourceUri) {
             savePlaybackState(0, true);
         }
 
@@ -177,14 +395,21 @@ const App = (() => {
         }
 
         maybeSavePlaybackState();
+
+        if (currentView === 'library') {
+            const playerBar = document.querySelector('.player-bar');
+            if (playerBar) {
+                renderPlayer();
+            } else {
+                updateTrackListHighlight();
+            }
+        }
     }
 
     function applyScanFolderResponse(data) {
         const scanData = parseJsonData(data);
         if (!scanData || !Array.isArray(scanData.files)) {
-            pendingScanCount = Math.max(0, pendingScanCount - 1);
-            isScanningLocalPaths = pendingScanCount > 0;
-            tryAutoRestorePlayback();
+            isScanningLocalPaths = false;
             alert(`Scan failed: ${data}`);
             return;
         }
@@ -222,13 +447,12 @@ const App = (() => {
                 tracks.push(track);
             }
         });
-        pendingScanCount = Math.max(0, pendingScanCount - 1);
-        isScanningLocalPaths = pendingScanCount > 0;
-        tryAutoRestorePlayback();
+        isScanningLocalPaths = false;
 
         if (scannedTracks.length === 0) {
             alert('Scan completed, but no supported audio files were found in this folder.');
         }
+        tryAutoRestorePlayback();
     }
 
     function applyAddLocalPathResponse(data) {
@@ -283,34 +507,97 @@ const App = (() => {
             return;
         }
 
+        if (selectedPlaylist?.isNetease) {
+            const stillExists = libraryPlaylists.some(playlist => playlist.id === selectedPlaylist.id);
+            if (!stillExists) selectedPlaylist = libraryPlaylists[0];
+            return;
+        }
+
         if (!selectedPlaylist?.isLocal || !libraryPlaylists.some(playlist => playlist.path === selectedPlaylist.path)) {
             selectedPlaylist = libraryPlaylists[0];
         }
     }
 
     function getLibraryPlaylists() {
-        return localPaths.map((path, index) => ({
+        const cloud = neteasePlaylists.map(playlist => ({
+            id: `netease-${playlist.externalId}`,
+            externalId: playlist.externalId,
+            isLocal: false,
+            isNetease: true,
+            name: playlist.name || '网易云歌单',
+            tracks: playlist.trackCount ?? 0,
+            duration: '网易云',
+            cover: (playlist.coverUrl || '').trim() || getDefaultCover(),
+            path: ''
+        }));
+        const local = localPaths.map((path, index) => ({
             id: `local-path-${path.id || index}`,
             sourceIndex: index,
             isLocal: true,
+            isNetease: false,
             name: getFolderDisplayName(path.path),
             tracks: path.trackCount ?? 0,
             duration: 'Local Library',
             cover: getDefaultCover(),
             path: path.path
         }));
+        return [...cloud, ...local];
+    }
+
+    function parseNeteaseSongId(source) {
+        if (!source || !String(source).startsWith('netease:')) return null;
+        const idPart = String(source).slice('netease:'.length).split(':')[0];
+        return idPart || null;
     }
 
     function normalizeTrack(track) {
+        const rawSource = track.sourceUri ?? track.SourceUri ?? track.filePath ?? track.FilePath ?? '';
+        const isNetease = Boolean(track.isNetease) || String(rawSource).startsWith('netease:');
+        const songId = track.songId ?? track.SongId ?? (isNetease ? parseNeteaseSongId(rawSource) : null);
+        const sourceUri = isNetease
+            ? (rawSource || (songId ? `netease:${songId}` : ''))
+            : rawSource;
+
         return {
-            id: track.id ?? track.Id,
-            title: track.title ?? track.Title ?? getFileNameWithoutExtension(track.filePath || track.sourceUri || ''),
+            id: track.id ?? track.Id ?? (songId ? `netease-${songId}` : sourceUri),
+            songId,
+            isNetease,
+            title: track.title ?? track.Title ?? getFileNameWithoutExtension(sourceUri),
             artist: track.artist ?? track.Artist ?? 'Unknown Artist',
-            album: track.album ?? track.Album ?? 'Local Music',
+            album: track.album ?? track.Album ?? (isNetease ? '网易云音乐' : 'Local Music'),
             duration: track.duration ?? track.Duration ?? '--:--',
             durationMs: track.durationMs ?? track.DurationMs ?? null,
-            filePath: track.filePath ?? track.FilePath ?? track.sourceUri ?? track.SourceUri ?? ''
+            coverUrl: track.coverUrl ?? track.CoverUrl ?? '',
+            filePath: isNetease ? '' : sourceUri,
+            sourceUri
         };
+    }
+
+    function getActiveTrackList() {
+        if (selectedPlaylist?.isNetease) {
+            return neteaseTracks;
+        }
+        if (selectedPlaylist?.isLocal) {
+            return tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path));
+        }
+        return tracks;
+    }
+
+    function findNeteasePlaylistById(playlistId) {
+        return getLibraryPlaylists().find(item =>
+            item.isNetease && String(item.externalId) === String(playlistId)
+        );
+    }
+
+    function selectNeteasePlaylist(playlistId) {
+        const playlist = findNeteasePlaylistById(playlistId);
+        if (!playlist) return;
+
+        selectedPlaylist = playlist;
+        isLoadingNeteaseTracks = true;
+        neteaseTracks = [];
+        render();
+        sendToCSharp('getNeteasePlaylistTracks', JSON.stringify({ playlistId: String(playlistId) }));
     }
 
     function getDefaultCover() {
@@ -333,14 +620,12 @@ const App = (() => {
     function scanAllLocalPaths() {
         if (localPaths.length === 0) return;
 
-        const pathsToScan = localPaths.filter(path => path.path);
-        if (pathsToScan.length === 0) return;
-
         isScanningLocalPaths = true;
-        pendingScanCount = pathsToScan.length;
         render();
-        pathsToScan.forEach(path => {
-            sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
+        localPaths.forEach(path => {
+            if (path.path) {
+                sendToCSharp('scanFolder', JSON.stringify({ Path: path.path }));
+            }
         });
     }
 
@@ -543,30 +828,47 @@ const App = (() => {
         return `Based on "${prompt}", I picked these from your local library:\n${names}`;
     }
 
-    function requestLyricsForFile(filePath) {
-        if (!filePath || loadedLyricsFilePath === filePath) return;
+    function requestLyricsForSource(sourceKey) {
+        if (!sourceKey || loadedLyricsKey === sourceKey) return;
 
-        loadedLyricsFilePath = filePath;
+        loadedLyricsKey = sourceKey;
         lastActiveLyricIndex = -1;
-        lyrics = [{ text: 'Loading lyrics...', time: 0 }];
-        sendToCSharp('getLyrics', JSON.stringify({ filePath }));
+        lyrics = [{ text: '正在加载歌词…', time: 0 }];
+        sendToCSharp('getLyrics', JSON.stringify({ filePath: sourceKey }));
+        if (currentView === 'ai-recommend') {
+            renderLyricsPanel();
+        }
     }
 
     function applyLyricsResponse(data) {
         const lyricData = parseJsonData(data);
-        if (lyricData?.filePath && lyricData.filePath !== currentFilePath) {
+        const activeKey = currentSourceUri || currentFilePath;
+        if (lyricData?.filePath && lyricData.filePath !== activeKey) {
             return;
         }
 
         if (!lyricData || !lyricData.found || !lyricData.content) {
-            lyrics = [{ text: 'No lyrics found', time: 0 }];
+            lyrics = [{ text: lyricData?.errorMessage || '未找到歌词', time: 0 }];
             lastActiveLyricIndex = -1;
             return;
         }
 
         const parsedLyrics = parseLrc(lyricData.content);
-        lyrics = parsedLyrics.length > 0 ? parsedLyrics : [{ text: 'No timed lyrics found', time: 0 }];
+        if (parsedLyrics.length > 0) {
+            lyrics = parsedLyrics;
+        } else {
+            const plainLines = lyricData.content
+                .split(/\r?\n/)
+                .map(line => line.replace(/\[[^\]]+\]/g, '').trim())
+                .filter(Boolean);
+            lyrics = plainLines.length > 0
+                ? plainLines.map((text, index) => ({ text, time: index * 3 }))
+                : [{ text: '暂无带时间轴的歌词', time: 0 }];
+        }
         lastActiveLyricIndex = -1;
+        if (currentView === 'ai-recommend') {
+            renderLyricsPanel();
+        }
     }
 
     function updateListeningStats(filePath, nextTime, nextIsPlaying) {
@@ -598,7 +900,20 @@ const App = (() => {
     }
 
     function getTrackPlatform(filePath) {
-        return filePath ? 'Local' : 'Unknown';
+        if (!filePath) return 'Unknown';
+        return String(filePath).startsWith('netease:') ? 'netease' : 'Local';
+    }
+
+    function parseLrcTimestamp(minutes, seconds, fraction) {
+        const frac = fraction || '0';
+        const ms = frac.length <= 2
+            ? Number(frac.padEnd(2, '0')) * 10
+            : Number(frac.padEnd(3, '0').slice(0, 3));
+        return minutes * 60 + seconds + ms / 1000;
+    }
+
+    function isLyricMetadata(text) {
+        return /^(ti|ar|al|by|offset|id|ve|key|hash|sign|qq|total):/i.test(text);
     }
 
     function parseLrc(content) {
@@ -606,17 +921,15 @@ const App = (() => {
         const parsed = [];
 
         content.split(/\r?\n/).forEach(line => {
-            const text = line.replace(timeTagPattern, '').trim();
-            if (!text) return;
-
             const tags = [...line.matchAll(timeTagPattern)];
+            if (tags.length === 0) return;
+
+            const text = line.replace(timeTagPattern, '').trim();
+            if (!text || isLyricMetadata(text)) return;
+
             tags.forEach(tag => {
-                const minutes = Number(tag[1]);
-                const seconds = Number(tag[2]);
-                const fraction = tag[3] || '0';
-                const milliseconds = Number(fraction.padEnd(3, '0').slice(0, 3));
                 parsed.push({
-                    time: minutes * 60 + seconds + milliseconds / 1000,
+                    time: parseLrcTimestamp(Number(tag[1]), Number(tag[2]), tag[3]),
                     text
                 });
             });
@@ -643,13 +956,6 @@ const App = (() => {
         }
     }
 
-    function loadInitialData() {
-        sendToCSharp('getWeeklyData');
-        sendToCSharp('getPlatformData');
-        sendToCSharp('getLocalPaths');
-        sendToCSharp('getSettings');
-    }
-
     function normalizeTheme(theme) {
         return theme === 'light' ? 'light' : 'dark';
     }
@@ -673,36 +979,33 @@ const App = (() => {
         document.body.classList.toggle('theme-dark', settings.theme === 'dark');
     }
 
-    function normalizePathForCompare(filePath) {
-        return String(filePath || '').replace(/\\/g, '/').toLowerCase();
+    function normalizePathForCompare(path) {
+        return String(path || '').replace(/\\/g, '/').toLowerCase();
     }
 
-    function findTrackIndexByPath(filePath) {
-        const target = normalizePathForCompare(filePath);
+    function findTrackIndexByPath(path) {
+        const target = normalizePathForCompare(path);
+        if (!target) return -1;
         return tracks.findIndex(track => normalizePathForCompare(track.filePath || track.sourceUri) === target);
     }
 
-    function getCurrentPlaylistTracks() {
-        if (!selectedPlaylist?.isLocal) return tracks;
-
-        const playlistPath = normalizePathForCompare(selectedPlaylist.path);
-        return tracks.filter(track => {
-            const trackPath = normalizePathForCompare(track.filePath || track.sourceUri);
-            return playlistPath && trackPath.startsWith(playlistPath);
-        });
+    function findCurrentPlaylistTrackIndexByPath(path) {
+        const target = normalizePathForCompare(path);
+        if (!target) return -1;
+        return getActiveTrackList().findIndex(track => normalizePathForCompare(track.filePath || track.sourceUri) === target);
     }
 
-    function findCurrentPlaylistTrackIndexByPath(filePath) {
-        const target = normalizePathForCompare(filePath);
-        return getCurrentPlaylistTracks().findIndex(track => {
-            return normalizePathForCompare(track.filePath || track.sourceUri) === target;
-        });
-    }
+    function selectPlaylistForTrack(path) {
+        const target = normalizePathForCompare(path);
+        if (!target) return;
 
-    function selectPlaylistForTrack(filePath) {
-        const target = normalizePathForCompare(filePath);
         const playlist = getLibraryPlaylists()
-            .find(item => item.path && target.startsWith(normalizePathForCompare(item.path)));
+            .filter(item => item.isLocal)
+            .find(item => {
+                const playlistPath = normalizePathForCompare(item.path);
+                return playlistPath && target.startsWith(playlistPath);
+            });
+
         if (playlist) selectedPlaylist = playlist;
     }
 
@@ -720,7 +1023,7 @@ const App = (() => {
             return;
         }
 
-        if (localPaths.length > 0 && (isScanningLocalPaths || pendingScanCount > 0)) return;
+        if (localPaths.length > 0 && isScanningLocalPaths) return;
 
         hasAutoRestoredPlayback = true;
         pendingRestoreTime = Math.max(0, Number(settings.lastPlaybackTime) || 0);
@@ -728,13 +1031,14 @@ const App = (() => {
     }
 
     function savePlaybackState(playbackTime = currentTime, force = false) {
-        if (!currentFilePath) return;
+        const playbackSource = currentSourceUri || currentFilePath;
+        if (!playbackSource) return;
 
         const now = Date.now();
         if (!force && now - lastPlaybackStateSavedAt < 10000) return;
 
         lastPlaybackStateSavedAt = now;
-        settings.lastTrackPath = currentFilePath;
+        settings.lastTrackPath = playbackSource;
         settings.lastPlaybackTime = Math.max(0, Number(playbackTime) || 0);
         sendToCSharp('savePlaybackState', JSON.stringify({
             lastTrackPath: settings.lastTrackPath,
@@ -745,6 +1049,14 @@ const App = (() => {
     function maybeSavePlaybackState() {
         if (!isPlaying) return;
         savePlaybackState(currentTime);
+    }
+
+    function loadInitialData() {
+        sendToCSharp('getWeeklyData');
+        sendToCSharp('getPlatformData');
+        sendToCSharp('getLocalPaths');
+        sendToCSharp('getSettings');
+        sendToCSharp('getNeteaseStatus');
     }
 
     function startProgressTimer() {
@@ -776,57 +1088,95 @@ const App = (() => {
         if (!filePath) return;
 
         currentFilePath = filePath;
+        currentSourceUri = filePath;
         currentTrackTitle = title;
         currentTrackArtist = artist;
         isPlaying = true;
-        requestLyricsForFile(filePath);
+        requestLyricsForSource(filePath);
         if (!options.skipSave) savePlaybackState(0, true);
         sendToCSharp('play', JSON.stringify({ filePath }));
         renderPlayer();
     }
 
     function toQueueTrack(track, index) {
-        const sourceUri = track.filePath || track.sourceUri || '';
+        const sourceUri = track.sourceUri || track.filePath || '';
         return {
             id: String(track.id || sourceUri || `track-${index}`),
             title: track.title || getFileNameWithoutExtension(sourceUri),
             artist: track.artist || 'Unknown Artist',
             sourceUri,
+            coverUrl: track.coverUrl || '',
             durationMs: track.durationMs || null
         };
     }
 
-    function getPlayableQueue() {
-        return getCurrentPlaylistTracks()
+    function getTrackCover(track) {
+        return String(track?.coverUrl || '').trim() || getDefaultCover();
+    }
+
+    function renderCoverImg(track, className = 'w-full h-full object-cover') {
+        const src = getTrackCover(track);
+        const fallback = getDefaultCover();
+        return `<img src="${escapeHtml(src)}" alt="" class="${className}" loading="lazy" onerror="this.onerror=null;this.src='${escapeHtml(fallback)}'">`;
+    }
+
+    function updateTrackListHighlight() {
+        document.querySelectorAll('[data-visible-track-index]').forEach(el => {
+            const index = Number(el.dataset.visibleTrackIndex);
+            el.classList.toggle('is-playing', isPlaying && currentQueueIndex === index);
+        });
+    }
+
+    function getPlayableQueue(sourceTracks = getActiveTrackList()) {
+        return sourceTracks
             .map(toQueueTrack)
             .filter(track => Boolean(track.sourceUri));
     }
 
-    function playTrackFromQueue(index, options = {}) {
-        const playlistTracks = getCurrentPlaylistTracks();
-        const queue = getPlayableQueue();
-        const selected = playlistTracks[index];
+    function playVisibleTrack(index, options = {}) {
+        const list = getActiveTrackList();
+        const selected = list[index];
         if (!selected) return;
 
-        if (queue.length > 0 && (selected.filePath || selected.sourceUri)) {
-            const selectedSource = selected.filePath || selected.sourceUri;
-            const startIndex = Math.max(0, queue.findIndex(track => track.sourceUri === selectedSource));
-            const track = queue[startIndex];
+        const sourceUri = selected.sourceUri || selected.filePath;
+        if (!sourceUri) return;
 
-            currentFilePath = track.sourceUri;
-            currentTrackTitle = track.title;
-            currentTrackArtist = track.artist;
-            isPlaying = true;
+        const queue = getPlayableQueue(list);
+        const startIndex = Math.max(0, queue.findIndex(track => track.sourceUri === sourceUri || track.id === String(selected.id)));
 
-            requestLyricsForFile(track.sourceUri);
-            if (!options.skipSave) savePlaybackState(0, true);
-            sendToCSharp('setQueue', JSON.stringify({ tracks: queue, startIndex }));
-            sendToCSharp('play', JSON.stringify({ filePath: track.sourceUri }));
-            renderPlayer();
+        currentFilePath = sourceUri;
+        currentSourceUri = sourceUri;
+        currentTrackTitle = selected.title;
+        currentTrackArtist = selected.artist;
+        currentCoverUrl = getTrackCover(selected);
+        currentQueueIndex = index;
+        isPlaying = true;
+
+        requestLyricsForSource(sourceUri);
+        if (!options.skipSave) savePlaybackState(0, true);
+
+        sendToCSharp('setQueue', JSON.stringify({
+            tracks: queue,
+            startIndex: startIndex >= 0 ? startIndex : index,
+            autoPlay: true
+        }));
+        renderPlayer();
+        if (currentView === 'library') updateTrackListHighlight();
+    }
+
+    function playTrackFromQueue(index, options = {}) {
+        if (selectedPlaylist) {
+            playVisibleTrack(index, options);
             return;
         }
 
-        promptAndPlayFile();
+        const selected = tracks[index];
+        if (!selected?.filePath && !selected?.sourceUri) {
+            promptAndPlayFile();
+            return;
+        }
+
+        playVisibleTrack(Math.max(0, getActiveTrackList().findIndex(track => track === selected)), options);
     }
 
     function cyclePlaybackStrategy() {
@@ -840,9 +1190,9 @@ const App = (() => {
     }
 
     function getPlaybackStrategyLabel() {
-        if (playbackStrategy === 'shuffle') return '随机';
-        if (playbackStrategy === 'repeat') return '循环';
-        return '顺序';
+        if (playbackStrategy === 'shuffle') return '闅忔満';
+        if (playbackStrategy === 'repeat') return '寰幆';
+        return '椤哄簭';
     }
 
     function promptAndPlayFile() {
@@ -853,10 +1203,15 @@ const App = (() => {
     }
 
     function getActiveLyricIndex() {
-        return lyrics.findIndex((lyric, index) => {
-            const nextLyric = lyrics[index + 1];
+        if (!lyrics.length) return -1;
+
+        const index = lyrics.findIndex((lyric, i) => {
+            const nextLyric = lyrics[i + 1];
             return currentTime >= lyric.time && (!nextLyric || currentTime < nextLyric.time);
         });
+        if (index >= 0) return index;
+        if (currentTime >= lyrics[lyrics.length - 1].time) return lyrics.length - 1;
+        return 0;
     }
 
     function buildDonutGradient(data) {
@@ -882,43 +1237,108 @@ const App = (() => {
         return Math.max((value / maxHours) * 100, 8);
     }
 
+    function getWeeklyMaxHours() {
+        const totals = weeklyData.map(day => {
+            if (day.platforms?.length) {
+                return day.platforms.reduce((sum, slice) => sum + Number(slice.hours || 0), 0);
+            }
+            return Number(day.hours || 0);
+        });
+        return Math.max(...totals, 0.1);
+    }
+
+    function renderWeeklyStackedBar(day, maxHours) {
+        const platforms = day.platforms || [];
+        const total = platforms.reduce((sum, slice) => sum + Number(slice.hours || 0), 0) || Number(day.hours || 0);
+        const barHeightPct = getWeeklyBarHeight(total, maxHours);
+
+        if (total <= 0 || platforms.length === 0) {
+            return `<div class="w-full bg-gray-700/30 rounded-t-lg" style="height:4%"></div>`;
+        }
+
+        const segments = platforms.map(slice => {
+            const segPct = total > 0 ? (Number(slice.hours) / total) * 100 : 0;
+            return `<div class="w-full" style="height:${segPct}%;background:${slice.color};min-height:${slice.hours > 0 ? '2px' : '0'}" title="${escapeHtml(slice.name)} ${slice.hours}h"></div>`;
+        }).join('');
+
+        return `
+            <div class="w-full flex flex-col justify-end rounded-t-lg overflow-hidden" style="height:${barHeightPct}%">
+                ${segments}
+            </div>
+        `;
+    }
+
+    function updateLyricsPadding() {
+        const container = document.getElementById('lyrics-panel');
+        const padTop = document.getElementById('lyrics-pad-top');
+        const padBottom = document.getElementById('lyrics-pad-bottom');
+        if (!container || !padTop || !padBottom) return;
+
+        const half = Math.max(container.clientHeight / 2, 120);
+        padTop.style.height = `${half}px`;
+        padBottom.style.height = `${half}px`;
+    }
+
+    function scrollLyricLineIntoCenter(container, activeLine) {
+        const lineRect = activeLine.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const targetTop = container.scrollTop
+            + (lineRect.top - containerRect.top)
+            - (container.clientHeight - lineRect.height) / 2;
+        container.scrollTo({
+            top: Math.max(0, targetTop),
+            behavior: 'smooth'
+        });
+    }
+
     function renderLyricsPanel() {
         const lyricsPanel = document.getElementById('lyrics-panel');
         if (lyricsPanel) {
             lyricsPanel.outerHTML = renderLyricsContent();
-            requestAnimationFrame(syncLyricHighlight);
+            requestAnimationFrame(() => {
+                updateLyricsPadding();
+                lastActiveLyricIndex = -1;
+                syncLyricHighlight();
+            });
         }
     }
 
     function syncLyricHighlight() {
-        const activeLyricIndex = getActiveLyricIndex();
-        if (activeLyricIndex === lastActiveLyricIndex) return;
-
-        lastActiveLyricIndex = activeLyricIndex;
-        document.querySelectorAll('[data-lyric-index]').forEach(line => {
-            const isActive = Number(line.dataset.lyricIndex) === activeLyricIndex;
-            line.classList.toggle('lyric-active', isActive);
-            line.classList.toggle('lyric-inactive', !isActive);
-        });
-
         const container = document.getElementById('lyrics-panel');
-        const activeLine = document.querySelector(`[data-lyric-index="${activeLyricIndex}"]`);
-        if (!container || !activeLine) return;
+        if (!container) return;
 
-        container.scrollTo({
-            top: activeLine.offsetTop - container.clientHeight / 2 + activeLine.clientHeight / 2,
-            behavior: 'smooth'
-        });
+        const activeLyricIndex = getActiveLyricIndex();
+        const indexChanged = activeLyricIndex !== lastActiveLyricIndex;
+
+        if (indexChanged) {
+            lastActiveLyricIndex = activeLyricIndex;
+            document.querySelectorAll('[data-lyric-index]').forEach(line => {
+                const lineIndex = Number(line.dataset.lyricIndex);
+                const isActive = lineIndex === activeLyricIndex;
+                line.classList.toggle('lyric-active', isActive);
+                line.classList.toggle('lyric-inactive', !isActive);
+            });
+        }
+
+        const scrollIndex = activeLyricIndex >= 0 ? activeLyricIndex : 0;
+        const activeLine = document.querySelector(`[data-lyric-index="${scrollIndex}"]`);
+        if (!activeLine) return;
+
+        if (indexChanged) {
+            scrollLyricLineIntoCenter(container, activeLine);
+        }
     }
 
     function renderLyricsContent() {
         const activeLyricIndex = getActiveLyricIndex();
         return `
-            <div id="lyrics-panel" class="flex-1 overflow-auto" style="scrollbar-width: none;">
-                <div class="flex flex-col items-center gap-6 py-16">
+            <div id="lyrics-panel" class="lyrics-panel flex-1 overflow-y-auto min-h-0" style="scrollbar-width: none;">
+                <div id="lyrics-scroll-inner" class="flex flex-col items-center gap-6">
+                    <div id="lyrics-pad-top" aria-hidden="true"></div>
                     ${lyrics.map((lyric, index) => `
                         <div class="lyric-line ${index === activeLyricIndex ? 'lyric-active' : 'lyric-inactive'}" data-lyric-index="${index}">${escapeHtml(lyric.text)}</div>
                     `).join('')}
+                    <div id="lyrics-pad-bottom" aria-hidden="true"></div>
                 </div>
             </div>
         `;
@@ -936,6 +1356,13 @@ const App = (() => {
             </div>
         `;
         attachEventListeners();
+        if (currentView === 'ai-recommend') {
+            requestAnimationFrame(() => {
+                updateLyricsPadding();
+                lastActiveLyricIndex = -1;
+                syncLyricHighlight();
+            });
+        }
     }
 
     function renderSidebar() {
@@ -1041,10 +1468,10 @@ const App = (() => {
                         </div>
                     </div>
                 </div>
-                <div class="w-96 card flex flex-col">
-                    <h3 class="text-lg font-semibold mb-6">Lyrics</h3>
+                <div class="w-96 card flex flex-col min-h-0 overflow-hidden">
+                    <h3 class="text-lg font-semibold mb-4 flex-shrink-0">Lyrics</h3>
                     ${renderLyricsContent()}
-                    <div class="mt-6 pt-6 border-t border-white/10 text-sm text-gray-500 text-center">
+                    <div class="mt-4 pt-4 border-t border-white/10 text-sm text-gray-500 text-center flex-shrink-0">
                         Playing from <span class="text-purple-400">AI Recommendations</span>
                     </div>
                 </div>
@@ -1069,12 +1496,12 @@ const App = (() => {
         ];
         return `
             <div class="space-y-8">
-                <div class="relative h-64 rounded-2xl overflow-hidden ai-discovery-banner">
+                <div class="relative h-64 rounded-2xl overflow-hidden">
                     <img src="https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=1200&h=400&fit=crop" alt="AI Discovery" class="w-full h-full object-cover">
                     <div class="absolute inset-0 bg-gradient-to-r from-black/80 via-black/50 to-transparent flex items-center">
                         <div class="p-12">
-                            <h2 class="text-4xl font-bold mb-3 banner-title">AI Discovery: Today Mood Radio</h2>
-                            <p class="text-lg text-gray-300 mb-6 banner-subtitle">Curated music for today based on your listening habits</p>
+                            <h2 class="text-4xl font-bold mb-3">AI Discovery: Today Mood Radio</h2>
+                            <p class="text-lg text-gray-300 mb-6">Curated music for today based on your listening habits</p>
                             <button class="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all font-medium">Start Listening</button>
                         </div>
                     </div>
@@ -1111,19 +1538,31 @@ const App = (() => {
     }
 
     function renderLibrary() {
-        const maxHours = Math.max(...weeklyData.map(d => d.hours), 1);
+        const maxHours = getWeeklyMaxHours();
         const totalHours = platformData.reduce((sum, p) => sum + Number(p.value || 0), 0);
-        const weekTotalHours = weeklyData.reduce((sum, d) => sum + Number(d.hours || 0), 0);
+        const weekTotalHours = weeklyData.reduce((sum, d) => {
+            if (d.platforms?.length) {
+                return sum + d.platforms.reduce((inner, slice) => inner + Number(slice.hours || 0), 0);
+            }
+            return sum + Number(d.hours || 0);
+        }, 0);
         const donutGradient = buildDonutGradient(platformData);
         const libraryPlaylists = getLibraryPlaylists();
         const hasLocalLibraries = libraryPlaylists.length > 0;
-        const trackListTitle = selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks';
-        const visibleTracks = getCurrentPlaylistTracks();
+        const hasNeteasePlaylists = neteasePlaylists.length > 0;
+        const trackListTitle = selectedPlaylist?.isNetease
+            ? `${selectedPlaylist.name}（网易云）`
+            : (selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks');
+        const visibleTracks = selectedPlaylist?.isNetease
+            ? neteaseTracks
+            : (selectedPlaylist?.isLocal
+                ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
+                : tracks);
         const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
-            ? '正在读取已有歌单歌曲...'
-            : '暂无歌曲';
+            ? '姝ｅ湪璇诲彇宸叉湁姝屽崟姝屾洸...'
+            : '鏆傛棤姝屾洸';
         const emptyTrackHint = hasLocalLibraries
-            ? '点击重新扫描已保存的曲库路径'
+            ? '鐐瑰嚮閲嶆柊鎵弿宸蹭繚瀛樼殑鏇插簱璺緞'
             : 'Click to manually enter an audio file path to play';
 
         return `
@@ -1134,7 +1573,7 @@ const App = (() => {
                         <div class="flex items-end gap-3 h-48">
                             ${weeklyData.map(d => `
                                 <div class="flex-1 h-full flex flex-col items-center justify-end gap-2">
-                                    <div class="w-full bg-purple-500/50 rounded-t-lg chart-bar" style="height: ${getWeeklyBarHeight(d.hours, maxHours)}%"></div>
+                                    ${renderWeeklyStackedBar(d, maxHours)}
                                     <span class="text-xs text-gray-400">${d.day}</span>
                                 </div>
                             `).join('')}
@@ -1157,7 +1596,7 @@ const App = (() => {
                                     <div class="flex items-center justify-between text-sm">
                                         <div class="flex items-center gap-2">
                                             <div class="w-3 h-3 rounded-full" style="background-color: ${p.color}"></div>
-                                            <span>${p.name}</span>
+                                            <span>${formatPlatformName(p.name)}</span>
                                         </div>
                                         <span class="text-gray-400">${p.value}h</span>
                                     </div>
@@ -1175,32 +1614,43 @@ const App = (() => {
                     </div>
                 </div>
                 <div class="card">
-                    <h3 class="text-xl font-semibold mb-6">Local Libraries</h3>
+                    <div class="flex items-center justify-between mb-6">
+                        <h3 class="text-xl font-semibold">歌单</h3>
+                        ${neteaseStatus.loggedIn ? `
+                            <button id="library-sync-netease-btn" class="px-3 py-1.5 text-sm bg-red-500/20 hover:bg-red-500/30 rounded-lg border border-red-500/30 text-red-300 transition-colors" ${isNeteaseSyncing ? 'disabled' : ''}>
+                                ${isNeteaseSyncing ? '同步中…' : '同步网易云'}
+                            </button>
+                        ` : ''}
+                    </div>
                     <div class="grid grid-cols-5 gap-4">
-                        ${hasLocalLibraries ? libraryPlaylists.map(playlist => `
-                            <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" data-local-playlist-index="${playlist.sourceIndex}">
-                                <div class="aspect-square rounded-lg overflow-hidden mb-3">
-                                    <img src="${playlist.cover || getDefaultCover()}" alt="${playlist.name || 'Playlist'}" class="w-full h-full object-cover">
+                        ${hasLocalLibraries || hasNeteasePlaylists ? libraryPlaylists.map(playlist => `
+                            <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" ${playlist.isNetease ? `data-netease-playlist-id="${playlist.externalId}"` : `data-local-playlist-index="${playlist.sourceIndex}"`}>
+                                <div class="aspect-square rounded-lg overflow-hidden mb-3 relative">
+                                    <img src="${escapeHtml(playlist.cover || getDefaultCover())}" alt="${playlist.name || 'Playlist'}" class="w-full h-full object-cover" loading="lazy" onerror="this.onerror=null;this.src='${escapeHtml(getDefaultCover())}'">
+                                    ${playlist.isNetease ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">网易</span>' : ''}
                                 </div>
                                 <h4 class="font-medium text-sm truncate">${playlist.name || 'Untitled Playlist'}</h4>
-                                <p class="text-xs text-gray-400">${playlist.tracks ?? 0} tracks - ${playlist.duration || '--'}</p>
+                                <p class="text-xs text-gray-400">${playlist.tracks ?? 0} 首 · ${playlist.duration || '--'}</p>
                             </div>
                         `).join('') : `
                             <button class="col-span-5 p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" data-empty-manual-play="true">
-                                <div class="text-lg font-medium mb-2">暂无歌曲</div>
+                                <div class="text-lg font-medium mb-2">鏆傛棤姝屾洸</div>
                                 <div class="text-sm text-gray-400">Click to manually enter an audio file path to play</div>
                             </button>
                         `}
                     </div>
                 </div>
                 <div class="card">
-                    <h3 class="text-xl font-semibold mb-6">${trackListTitle}</h3>
+                    <h3 class="text-xl font-semibold mb-6">${trackListTitle}${isLoadingNeteaseTracks ? ' <span class="text-sm text-gray-400 font-normal">加载中…</span>' : ''}</h3>
                     <div class="space-y-2">
                         ${visibleTracks.length > 0 ? visibleTracks.map((track, index) => `
-                            <div class="track-row group" data-track-index="${index}">
-                                <div class="w-8 text-gray-400 text-sm">${index + 1}</div>
-                                <div class="track-play">
-                                    <svg class="w-4 h-4 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                            <div class="track-row group ${isPlaying && currentQueueIndex === index ? 'is-playing' : ''}" data-visible-track-index="${index}">
+                                <div class="w-8 text-gray-400 text-sm shrink-0">${index + 1}</div>
+                                <div class="track-cover">
+                                    ${renderCoverImg(track)}
+                                    <div class="track-play">
+                                        <svg class="w-4 h-4 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                    </div>
                                 </div>
                                 <div class="flex-1 min-w-0">
                                     <div class="font-medium truncate">${track.title || 'Untitled Track'}</div>
@@ -1210,10 +1660,10 @@ const App = (() => {
                                 <div class="text-sm text-gray-400 w-16 text-right">${track.duration || '--:--'}</div>
                             </div>
                         `).join('') : `
-                            <button class="w-full p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" ${hasLocalLibraries ? 'data-rescan-empty-library="true"' : 'data-empty-manual-play="true"'}>
-                                <div class="text-lg font-medium mb-2">${emptyTrackText}</div>
-                                <div class="text-sm text-gray-400">${emptyTrackHint}</div>
-                            </button>
+                            <div class="w-full p-8 rounded-lg bg-white/5 border border-white/10 text-center text-gray-400">
+                                <div class="text-lg font-medium mb-2 text-white">${isLoadingNeteaseTracks ? '正在加载歌单曲目…' : (selectedPlaylist?.isNetease ? '请选择网易云歌单或先同步' : emptyTrackText)}</div>
+                                <div class="text-sm">${isLoadingNeteaseTracks ? '首次打开会从网易云拉取曲目' : (selectedPlaylist?.isNetease ? '打开歌单后将自动播放第一首' : emptyTrackHint)}</div>
+                            </div>
                         `}
                     </div>
                 </div>
@@ -1230,9 +1680,9 @@ const App = (() => {
                         <div>
                             <label class="block text-sm text-gray-400 mb-3">主题模式</label>
                             <div class="flex gap-2">
-                                ${['light', 'dark'].map(t => `
+                                ${['light', 'dark', 'system'].map(t => `
                                     <button class="px-4 py-2 rounded-lg border ${settings.theme === t ? 'bg-purple-500/20 text-purple-400 border-purple-500' : 'border-white/10 text-gray-400 hover:bg-white/5'} transition-colors" data-theme="${t}">
-                                        ${t === 'light' ? '浅色' : '深色'}
+                                        ${t === 'light' ? '浅色' : t === 'dark' ? '深色' : '跟随系统'}
                                     </button>
                                 `).join('')}
                             </div>
@@ -1321,36 +1771,44 @@ const App = (() => {
                         </div>
                     </div>
                 </div>
-                <div class="card">
-                    <h2 class="text-xl font-semibold mb-6">服务绑定状态</h2>
-                    <div class="space-y-4">
-                        <div class="flex items-center justify-between p-4 bg-white/5 rounded-lg border border-white/10">
-                            <div class="flex items-center gap-4">
-                                <div class="w-12 h-12 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center">
-                                    <span class="text-xl font-bold">S</span>
-                                </div>
-                                <div>
-                                    <div class="font-medium">Spotify</div>
-                                    <div class="text-sm text-gray-400">未连接</div>
-                                </div>
-                            </div>
-                            <button class="px-4 py-2 bg-green-500/20 hover:bg-green-500/30 rounded-lg border border-green-500/30 transition-colors text-green-400">立即绑定</button>
+                <div class="card" id="netease-settings-card">
+                    <h2 class="text-xl font-semibold mb-6">网易云音乐</h2>
+                    <div class="space-y-4 mb-4">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-2">API 服务地址（NeteaseCloudMusicApi）</label>
+                            <input id="netease-api-url" type="text" value="${escapeHtml(neteaseStatus.apiBaseUrl)}" class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500/50 transition-colors text-white" placeholder="http://127.0.0.1:3000">
+                            <p class="text-xs text-gray-500 mt-2">需在本机先运行 NeteaseCloudMusicApi，默认端口 3000。</p>
                         </div>
-                        <div class="flex items-center justify-between p-4 bg-white/5 rounded-lg border border-white/10">
-                            <div class="flex items-center gap-4">
-                                <div class="w-12 h-12 rounded-full bg-gradient-to-br from-red-500 to-rose-600 flex items-center justify-center">
-                                    <span class="text-xl font-bold">网</span>
+                        <button id="save-netease-api-btn" class="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 text-sm transition-colors">保存 API 地址</button>
+                    </div>
+                    <div class="flex items-center justify-between p-4 bg-white/5 rounded-lg border border-white/10">
+                        <div class="flex items-center gap-4">
+                            ${neteaseStatus.avatarUrl
+                                ? `<img src="${escapeHtml(neteaseStatus.avatarUrl)}" alt="avatar" class="w-12 h-12 rounded-full object-cover">`
+                                : `<div class="w-12 h-12 rounded-full bg-gradient-to-br from-red-500 to-rose-600 flex items-center justify-center"><span class="text-xl font-bold">网</span></div>`}
+                            <div>
+                                <div class="font-medium">账号状态</div>
+                                <div class="text-sm text-gray-400">
+                                    ${neteaseStatus.loggedIn
+                                        ? `已登录：${escapeHtml(neteaseStatus.nickname || '网易云用户')} · ${neteaseStatus.playlistCount} 个歌单`
+                                        : '未登录'}
                                 </div>
-                                <div>
-                                    <div class="font-medium">网易云音乐</div>
-                                    <div class="text-sm text-gray-400 flex items-center gap-2">
-                                        <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                                        已登录 (user@example.com)
-                                    </div>
-                                </div>
+                                ${neteaseStatus.lastSyncAt ? `<div class="text-xs text-gray-500 mt-1">上次同步：${new Date(neteaseStatus.lastSyncAt).toLocaleString()}</div>` : ''}
                             </div>
-                            <button class="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded-lg border border-red-500/30 transition-colors text-red-400">解绑</button>
                         </div>
+                        <div class="flex flex-col gap-2 items-end">
+                            ${neteaseStatus.loggedIn ? `
+                                <button id="sync-netease-btn" class="px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 rounded-lg border border-purple-500/30 transition-colors text-purple-200 text-sm" ${isNeteaseSyncing ? 'disabled' : ''}>${isNeteaseSyncing ? '同步中…' : '同步歌单与听歌数据'}</button>
+                                <button id="netease-logout-btn" class="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded-lg border border-red-500/30 transition-colors text-red-400 text-sm">解绑</button>
+                            ` : `
+                                <button id="netease-qr-login-btn" class="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 rounded-lg border border-red-500/30 transition-colors text-red-300">扫码登录</button>
+                            `}
+                        </div>
+                    </div>
+                    <div id="netease-qr-panel" class="mt-6 p-6 bg-white/5 rounded-xl border border-white/10 text-center ${neteaseQrImage ? '' : 'hidden'}">
+                        <p id="netease-qr-message" class="text-sm text-gray-300 mb-4">${escapeHtml(neteaseQrMessage || '请使用网易云音乐 App 扫描二维码')}</p>
+                        <img id="netease-qr-img" src="${escapeHtml(neteaseQrImage || '')}" alt="网易云登录二维码" class="mx-auto w-48 h-48 rounded-lg bg-white p-2">
+                        <button id="cancel-netease-qr-btn" class="mt-4 text-sm text-gray-400 hover:text-white transition-colors">取消扫码</button>
                     </div>
                 </div>
                 <div class="h-24"></div>
@@ -1361,8 +1819,8 @@ const App = (() => {
         return `
             <div class="player-bar px-6 flex items-center gap-6 text-white">
                 <div class="flex items-center gap-4 w-80">
-                    <div class="w-16 h-16 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center overflow-hidden">
-                        <img src="${getDefaultCover()}" alt="Album" class="w-full h-full object-cover">
+                    <div class="w-16 h-16 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center overflow-hidden shrink-0">
+                        <img src="${escapeHtml(currentCoverUrl || getDefaultCover())}" alt="Album" class="w-full h-full object-cover" onerror="this.onerror=null;this.src='${escapeHtml(getDefaultCover())}'">
                     </div>
                     <div class="flex-1 min-w-0">
                         <div class="font-medium truncate">${currentTrackTitle || 'No track selected'}</div>
@@ -1394,7 +1852,7 @@ const App = (() => {
                     </div>
                 </div>
                 <div class="flex items-center gap-4 w-80 justify-end">
-                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="播放模式">
+                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="鎾斁妯″紡">
                         <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
                         <span>${getPlaybackStrategyLabel()}</span>
                     </button>
@@ -1432,10 +1890,16 @@ const App = (() => {
             });
         }
 
+        document.querySelectorAll('[data-netease-playlist-id]').forEach(el => {
+            el.addEventListener('click', () => {
+                selectNeteasePlaylist(el.dataset.neteasePlaylistId);
+            });
+        });
+
         document.querySelectorAll('[data-local-playlist-index]').forEach(el => {
             el.addEventListener('click', () => {
                 const index = Number(el.dataset.localPlaylistIndex);
-                const playlist = getLibraryPlaylists()[index];
+                const playlist = getLibraryPlaylists().filter(item => item.isLocal)[index];
                 if (!playlist) return;
 
                 selectedPlaylist = playlist;
@@ -1446,9 +1910,65 @@ const App = (() => {
             });
         });
 
-        document.querySelectorAll('[data-track-index]').forEach(el => {
+        const saveNeteaseApiBtn = document.getElementById('save-netease-api-btn');
+        if (saveNeteaseApiBtn) {
+            saveNeteaseApiBtn.addEventListener('click', () => {
+                const url = document.getElementById('netease-api-url')?.value.trim();
+                if (url) {
+                    sendToCSharp('setNeteaseApiBaseUrl', JSON.stringify({ apiBaseUrl: url }));
+                }
+            });
+        }
+
+        const neteaseQrLoginBtn = document.getElementById('netease-qr-login-btn');
+        if (neteaseQrLoginBtn) {
+            neteaseQrLoginBtn.addEventListener('click', () => {
+                const url = document.getElementById('netease-api-url')?.value.trim();
+                if (url) {
+                    sendToCSharp('setNeteaseApiBaseUrl', JSON.stringify({ apiBaseUrl: url }));
+                }
+                sendToCSharp('neteaseQrStart');
+            });
+        }
+
+        const cancelNeteaseQrBtn = document.getElementById('cancel-netease-qr-btn');
+        if (cancelNeteaseQrBtn) {
+            cancelNeteaseQrBtn.addEventListener('click', () => {
+                stopNeteaseQrPoll();
+                neteaseQrImage = '';
+                updateNeteaseQrPanel();
+            });
+        }
+
+        const syncNeteaseBtn = document.getElementById('sync-netease-btn');
+        if (syncNeteaseBtn) {
+            syncNeteaseBtn.addEventListener('click', () => {
+                isNeteaseSyncing = true;
+                render();
+                sendToCSharp('syncNetease');
+            });
+        }
+
+        const librarySyncNeteaseBtn = document.getElementById('library-sync-netease-btn');
+        if (librarySyncNeteaseBtn) {
+            librarySyncNeteaseBtn.addEventListener('click', () => {
+                isNeteaseSyncing = true;
+                render();
+                sendToCSharp('syncNetease');
+            });
+        }
+
+        const neteaseLogoutBtn = document.getElementById('netease-logout-btn');
+        if (neteaseLogoutBtn) {
+            neteaseLogoutBtn.addEventListener('click', () => {
+                stopNeteaseQrPoll();
+                sendToCSharp('neteaseLogout');
+            });
+        }
+
+        document.querySelectorAll('[data-visible-track-index]').forEach(el => {
             el.addEventListener('click', () => {
-                playTrackFromQueue(Number(el.dataset.trackIndex));
+                playVisibleTrack(Number(el.dataset.visibleTrackIndex));
             });
         });
 
