@@ -254,16 +254,27 @@
         .track-row:hover { background: rgba(255,255,255,0.05); }
         body.theme-light .track-row:hover { background: rgba(15,23,42,0.06); }
         .track-row:hover .track-play { opacity: 1; }
+        .track-cover {
+            width: 44px;
+            height: 44px;
+            flex: 0 0 44px;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            background: rgba(255,255,255,0.08);
+        }
         .track-play {
-            width: 40px;
-            height: 40px;
+            width: 100%;
+            height: 100%;
             border-radius: 50%;
-            background: rgba(168,85,247,0.2);
+            background: rgba(0,0,0,0.45);
             display: flex;
             align-items: center;
             justify-content: center;
             opacity: 0;
             transition: opacity 0.2s;
+            position: absolute;
+            inset: 0;
         }
         body.theme-light .text-white { color: #111827 !important; }
         body.theme-light .text-gray-300 { color: #475569 !important; }

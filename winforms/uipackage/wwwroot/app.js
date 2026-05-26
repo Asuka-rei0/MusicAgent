@@ -103,7 +103,7 @@ const App = (() => {
                         color: slice.color ?? slice.Color ?? '#8B5CF6'
                     }))
                 }));
-                if (currentView === 'library') render();
+                if (currentView === 'library') renderLibraryStats();
                 break;
             case 'getPlatformData':
                 platformData = JSON.parse(data).map(item => ({
@@ -111,7 +111,7 @@ const App = (() => {
                     value: Number(item.value ?? item.Value ?? 0),
                     color: item.color ?? item.Color ?? '#8B5CF6'
                 }));
-                if (currentView === 'library') render();
+                if (currentView === 'library') renderLibraryStats();
                 break;
             case 'getLocalPaths':
                 localPaths = normalizeLocalPaths(JSON.parse(data));
@@ -329,10 +329,6 @@ const App = (() => {
         if (neteaseTracks.length === 0) {
             alert(payload?.message || '该歌单暂无曲目，请重新同步网易云数据。');
             return;
-        }
-
-        if (selectedPlaylist?.isNetease) {
-            playVisibleTrack(0);
         }
     }
 
@@ -1268,6 +1264,87 @@ const App = (() => {
         `;
     }
 
+    function getWeekTotalHours() {
+        return weeklyData.reduce((sum, day) => {
+            if (day.platforms?.length) {
+                return sum + day.platforms.reduce((inner, slice) => inner + Number(slice.hours || 0), 0);
+            }
+            return sum + Number(day.hours || 0);
+        }, 0);
+    }
+
+    function renderWeeklyReportCard() {
+        const maxHours = getWeeklyMaxHours();
+        const weekTotalHours = getWeekTotalHours();
+
+        return `
+            <div class="card">
+                <h3 class="text-xl font-semibold mb-6">Weekly Report</h3>
+                <div class="flex items-end gap-3 h-48">
+                    ${weeklyData.map(d => `
+                        <div class="flex-1 h-full flex flex-col items-center justify-end gap-2">
+                            ${renderWeeklyStackedBar(d, maxHours)}
+                            <span class="text-xs text-gray-400">${d.day}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                <div class="mt-4 text-sm text-gray-400">Total: <span class="text-white font-semibold">${weekTotalHours.toFixed(1)} hours</span> this week</div>
+            </div>
+        `;
+    }
+
+    function renderListeningTimeCard() {
+        const totalHours = platformData.reduce((sum, p) => sum + Number(p.value || 0), 0);
+        const donutGradient = buildDonutGradient(platformData);
+
+        return `
+            <div class="card">
+                <h3 class="text-xl font-semibold mb-6">Listening Time</h3>
+                <div class="flex items-center justify-between">
+                    <div class="w-36 h-36 rounded-full flex items-center justify-center" style="background: ${donutGradient};">
+                        <div class="w-24 h-24 rounded-full bg-gray-950 flex items-center justify-center">
+                            <div class="text-center">
+                            <div class="text-2xl font-bold">${totalHours.toFixed(1)}</div>
+                            <div class="text-xs text-gray-400">Hours</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="flex-1 space-y-3 ml-6">
+                        ${platformData.length > 0 ? platformData.map(p => `
+                            <div class="flex items-center justify-between text-sm">
+                                <div class="flex items-center gap-2">
+                                    <div class="w-3 h-3 rounded-full" style="background-color: ${p.color}"></div>
+                                    <span>${formatPlatformName(p.name)}</span>
+                                </div>
+                                <span class="text-gray-400">${p.value}h</span>
+                            </div>
+                        `).join('') : `
+                            <div class="flex items-center justify-between text-sm">
+                                <div class="flex items-center gap-2">
+                                    <div class="w-3 h-3 rounded-full bg-gray-600"></div>
+                                    <span>No listening data</span>
+                                </div>
+                                <span class="text-gray-400">0h</span>
+                            </div>
+                        `}
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderLibraryStats() {
+        const weeklyEl = document.getElementById('library-weekly-report');
+        if (weeklyEl) {
+            weeklyEl.innerHTML = renderWeeklyReportCard();
+        }
+
+        const platformEl = document.getElementById('library-listening-time');
+        if (platformEl) {
+            platformEl.innerHTML = renderListeningTimeCard();
+        }
+    }
+
     function updateLyricsPadding() {
         const container = document.getElementById('lyrics-panel');
         const padTop = document.getElementById('lyrics-pad-top');
@@ -1538,15 +1615,6 @@ const App = (() => {
     }
 
     function renderLibrary() {
-        const maxHours = getWeeklyMaxHours();
-        const totalHours = platformData.reduce((sum, p) => sum + Number(p.value || 0), 0);
-        const weekTotalHours = weeklyData.reduce((sum, d) => {
-            if (d.platforms?.length) {
-                return sum + d.platforms.reduce((inner, slice) => inner + Number(slice.hours || 0), 0);
-            }
-            return sum + Number(d.hours || 0);
-        }, 0);
-        const donutGradient = buildDonutGradient(platformData);
         const libraryPlaylists = getLibraryPlaylists();
         const hasLocalLibraries = libraryPlaylists.length > 0;
         const hasNeteasePlaylists = neteasePlaylists.length > 0;
@@ -1568,50 +1636,8 @@ const App = (() => {
         return `
             <div class="space-y-6">
                 <div class="grid grid-cols-2 gap-6">
-                    <div class="card">
-                        <h3 class="text-xl font-semibold mb-6">Weekly Report</h3>
-                        <div class="flex items-end gap-3 h-48">
-                            ${weeklyData.map(d => `
-                                <div class="flex-1 h-full flex flex-col items-center justify-end gap-2">
-                                    ${renderWeeklyStackedBar(d, maxHours)}
-                                    <span class="text-xs text-gray-400">${d.day}</span>
-                                </div>
-                            `).join('')}
-                        </div>
-                        <div class="mt-4 text-sm text-gray-400">Total: <span class="text-white font-semibold">${weekTotalHours.toFixed(1)} hours</span> this week</div>
-                    </div>
-                    <div class="card">
-                        <h3 class="text-xl font-semibold mb-6">Listening Time</h3>
-                        <div class="flex items-center justify-between">
-                            <div class="w-36 h-36 rounded-full flex items-center justify-center" style="background: ${donutGradient};">
-                                <div class="w-24 h-24 rounded-full bg-gray-950 flex items-center justify-center">
-                                    <div class="text-center">
-                                    <div class="text-2xl font-bold">${totalHours.toFixed(1)}</div>
-                                    <div class="text-xs text-gray-400">Hours</div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="flex-1 space-y-3 ml-6">
-                                ${platformData.length > 0 ? platformData.map(p => `
-                                    <div class="flex items-center justify-between text-sm">
-                                        <div class="flex items-center gap-2">
-                                            <div class="w-3 h-3 rounded-full" style="background-color: ${p.color}"></div>
-                                            <span>${formatPlatformName(p.name)}</span>
-                                        </div>
-                                        <span class="text-gray-400">${p.value}h</span>
-                                    </div>
-                                `).join('') : `
-                                    <div class="flex items-center justify-between text-sm">
-                                        <div class="flex items-center gap-2">
-                                            <div class="w-3 h-3 rounded-full bg-gray-600"></div>
-                                            <span>No listening data</span>
-                                        </div>
-                                        <span class="text-gray-400">0h</span>
-                                    </div>
-                                `}
-                            </div>
-                        </div>
-                    </div>
+                    <div id="library-weekly-report">${renderWeeklyReportCard()}</div>
+                    <div id="library-listening-time">${renderListeningTimeCard()}</div>
                 </div>
                 <div class="card">
                     <div class="flex items-center justify-between mb-6">
