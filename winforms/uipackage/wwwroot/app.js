@@ -943,6 +943,36 @@ const App = (() => {
             .replace(/'/g, '&#39;');
     }
 
+    function renderMarkdown(text) {
+        if (!text) return '';
+        let html = escapeHtml(text);
+        html = html.replace(/```([\s\S]*?)```/g, '<pre class="bg-white/5 rounded-lg p-3 my-2 overflow-x-auto text-xs"><code>$1</code></pre>');
+        html = html.replace(/`([^`]+)`/g, '<code class="bg-white/10 px-1.5 py-0.5 rounded text-xs">$1</code>');
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, '<em>$1</em>');
+        html = html.replace(/^### (.+)$/gm, '<h3 class="text-base font-semibold mt-3 mb-1">$1</h3>');
+        html = html.replace(/^## (.+)$/gm, '<h2 class="text-lg font-semibold mt-3 mb-1">$1</h2>');
+        html = html.replace(/^# (.+)$/gm, '<h1 class="text-xl font-bold mt-3 mb-1">$1</h1>');
+        html = html.replace(/^[-*] (.+)$/gm, '<li class="ml-4 list-disc">$1</li>');
+        html = html.replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal">$1</li>');
+        html = html.replace(/\n/g, '<br>');
+        html = html.replace(/<br><li/g, '<li');
+        html = html.replace(/<\/li><br>/g, '</li>');
+        return html;
+    }
+
+    function scrollChatToBottom() {
+        requestAnimationFrame(() => {
+            const chatContainer = document.getElementById('chat-messages');
+            if (chatContainer) {
+                chatContainer.scrollTo({
+                    top: chatContainer.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }
+        });
+    }
+
     function sendToCSharp(action, data = '') {
         const message = { id: Date.now().toString(), action, data };
         if (window.chrome && window.chrome.webview) {
@@ -1505,7 +1535,7 @@ const App = (() => {
                                 <div class="flex gap-3 ${msg.type === 'user' ? 'justify-end' : ''}">
                                     ${msg.type === 'ai' ? `<div class="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center flex-shrink-0"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg></div>` : ''}
                                     <div class="message-bubble ${msg.type === 'user' ? 'message-user' : 'message-ai'}">
-                                        <p class="text-sm leading-relaxed whitespace-pre-line">${escapeHtml(msg.content)}</p>
+                                        <p class="text-sm leading-relaxed whitespace-pre-line">${renderMarkdown(msg.content)}</p>
                                         <p class="text-xs text-gray-500 mt-2">${msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
                                     </div>
                                     ${msg.type === 'user' ? `<div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center flex-shrink-0"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg></div>` : ''}
@@ -2176,6 +2206,7 @@ const App = (() => {
         aiState = { isLoading: true, error: null };
         aiRecommendedTracks = recommendLocalTracks(content);
         render();
+        scrollChatToBottom();
 
         try {
             const responseText = await requestAIMessage(content);
@@ -2196,6 +2227,7 @@ const App = (() => {
         } finally {
             aiState.isLoading = false;
             render();
+            scrollChatToBottom();
         }
     }
 
@@ -2212,6 +2244,7 @@ const App = (() => {
         messages.push(newMessage);
         input.value = '';
         render();
+        scrollChatToBottom();
 
         setTimeout(() => {
             const aiResponse = {
@@ -2222,6 +2255,7 @@ const App = (() => {
             };
             messages.push(aiResponse);
             render();
+            scrollChatToBottom();
         }, 1000);
     }
 

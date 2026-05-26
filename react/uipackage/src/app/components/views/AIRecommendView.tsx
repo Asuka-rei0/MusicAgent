@@ -3,6 +3,29 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Bot, User, Send } from 'lucide-react';
 import { usePlayer } from '../../contexts/PlayerContext';
 
+function renderMarkdown(text: string): string {
+  if (!text) return '';
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  html = html.replace(/```([\s\S]*?)```/g, '<pre class="bg-white/5 rounded-lg p-3 my-2 overflow-x-auto text-xs"><code>$1</code></pre>');
+  html = html.replace(/`([^`]+)`/g, '<code class="bg-white/10 px-1.5 py-0.5 rounded text-xs">$1</code>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, '<em>$1</em>');
+  html = html.replace(/^### (.+)$/gm, '<h3 class="text-base font-semibold mt-3 mb-1">$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2 class="text-lg font-semibold mt-3 mb-1">$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1 class="text-xl font-bold mt-3 mb-1">$1</h1>');
+  html = html.replace(/^[-*] (.+)$/gm, '<li class="ml-4 list-disc">$1</li>');
+  html = html.replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal">$1</li>');
+  html = html.replace(/\n/g, '<br>');
+  html = html.replace(/<br><li/g, '<li');
+  html = html.replace(/<\/li><br>/g, '</li>');
+  return html;
+}
+
 interface Message {
   id: string;
   type: 'user' | 'ai';
@@ -20,7 +43,7 @@ export default function AIRecommendView() {
   const [messages, setMessages] = useState<Message[]>([]);
 
   const [inputValue, setInputValue] = useState('');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
   const lyricsContainerRef = useRef<HTMLDivElement>(null);
   const activeLyricRef = useRef<HTMLDivElement>(null);
 
@@ -48,7 +71,12 @@ export default function AIRecommendView() {
   });
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTo({
+        top: chatContainerRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
+    }
   }, [messages]);
 
   // Auto-scroll lyrics to active line
@@ -106,7 +134,7 @@ export default function AIRecommendView() {
             AI Music Assistant
           </h2>
 
-          <div className="flex-1 overflow-auto space-y-4">
+          <div ref={chatContainerRef} className="flex-1 overflow-auto space-y-4">
             <AnimatePresence>
               {messages.map((message) => (
                 <motion.div
@@ -128,7 +156,7 @@ export default function AIRecommendView() {
                         : 'bg-white/5 border border-white/10'
                     }`}
                   >
-                    <p className="text-sm leading-relaxed">{message.content}</p>
+                    <p className="text-sm leading-relaxed whitespace-pre-line" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
                     <p className="text-xs text-gray-500 mt-2">
                       {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </p>
@@ -142,7 +170,6 @@ export default function AIRecommendView() {
                 </motion.div>
               ))}
             </AnimatePresence>
-            <div ref={messagesEndRef} />
           </div>
 
           {/* Input */}
