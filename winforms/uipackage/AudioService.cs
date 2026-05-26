@@ -317,10 +317,27 @@ public class AudioService
         currentLogicalSource = sourceUri;
         currentCoverUrl = coverUrl ?? "";
 
+        NeteaseTrackMetadata? neteaseMetadata = null;
+        if (neteaseService != null && NeteaseService.TryParseNeteaseSource(sourceUri, out var songId))
+        {
+            neteaseMetadata = neteaseService.GetCachedTrackMetadata(songId);
+            if (string.IsNullOrWhiteSpace(currentCoverUrl))
+            {
+                currentCoverUrl = neteaseMetadata?.CoverUrl ?? "";
+            }
+        }
+
         var displayTitle = string.IsNullOrWhiteSpace(title)
-            ? Path.GetFileNameWithoutExtension(resolvedPath)
+            ? (!string.IsNullOrWhiteSpace(neteaseMetadata?.Title)
+                ? neteaseMetadata.Title
+                : Path.GetFileNameWithoutExtension(resolvedPath))
             : title;
-        var displayArtist = string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist;
+        var displayArtist = string.IsNullOrWhiteSpace(artist)
+            ? (!string.IsNullOrWhiteSpace(neteaseMetadata?.Artist) ? neteaseMetadata.Artist : "Unknown Artist")
+            : artist;
+        var displayDurationMs = manifestIndex.HasValue
+            ? queueManifest[manifestIndex.Value].DurationMs
+            : (neteaseMetadata?.DurationMs > 0 ? neteaseMetadata.DurationMs : null);
 
         audioCore.SetQueue(new[]
         {
@@ -330,7 +347,7 @@ public class AudioService
                 SourceUri = resolvedPath,
                 Title = displayTitle,
                 Artist = displayArtist,
-                DurationMs = manifestIndex.HasValue ? queueManifest[manifestIndex.Value].DurationMs : null
+                DurationMs = displayDurationMs
             }
         });
 

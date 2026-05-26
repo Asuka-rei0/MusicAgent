@@ -1,4 +1,4 @@
-const App = (() => {
+﻿const App = (() => {
     let currentView = 'ai-recommend';
     let isPlaying = false;
     let progress = 0;
@@ -1216,9 +1216,9 @@ const App = (() => {
     }
 
     function getPlaybackStrategyLabel() {
-        if (playbackStrategy === 'shuffle') return '闅忔満';
-        if (playbackStrategy === 'repeat') return '寰幆';
-        return '椤哄簭';
+        if (playbackStrategy === 'shuffle') return '随机';
+        if (playbackStrategy === 'repeat') return '循环';
+        return '顺序';
     }
 
     function promptAndPlayFile() {
@@ -1888,7 +1888,7 @@ const App = (() => {
                 </div>
                 <div class="flex-1 flex flex-col items-center gap-2">
                     <div class="flex items-center gap-4">
-                        <button id="previous-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="Previous">
+                        <button id="previous-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="上一首">
                             <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
                         </button>
                         <button id="play-pause-btn" class="play-button">
@@ -1897,7 +1897,7 @@ const App = (() => {
                                 '<svg class="w-6 h-6 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'
                             }
                         </button>
-                        <button id="next-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="Next">
+                        <button id="next-btn" class="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-300 hover:text-white" title="下一首">
                             <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
                         </button>
                     </div>
@@ -1908,7 +1908,7 @@ const App = (() => {
                     </div>
                 </div>
                 <div class="flex items-center gap-4 w-80 justify-end">
-                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="鎾斁妯″紡">
+                    <button id="strategy-btn" class="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full hover:from-purple-500/30 hover:to-pink-500/30 transition-colors border border-purple-500/30 text-xs text-purple-200" title="播放模式">
                         <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
                         <span>${getPlaybackStrategyLabel()}</span>
                     </button>

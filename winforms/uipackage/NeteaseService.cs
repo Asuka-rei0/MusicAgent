@@ -462,6 +462,28 @@ public class NeteaseService
         return cacheFile;
     }
 
+    public NeteaseTrackMetadata? GetCachedTrackMetadata(long songId)
+    {
+        if (songId <= 0) return null;
+
+        var track = _context.NeteasePlaylistTracks
+            .Where(t => t.SongId == songId)
+            .OrderBy(t => t.Id)
+            .FirstOrDefault();
+
+        if (track == null) return null;
+
+        return new NeteaseTrackMetadata
+        {
+            SongId = track.SongId,
+            Title = track.Title,
+            Artist = track.Artist,
+            Album = track.Album,
+            DurationMs = track.DurationMs,
+            CoverUrl = track.CoverUrl
+        };
+    }
+
     public static bool TryParseNeteaseSource(string source, out long songId)
     {
         songId = 0;
@@ -1292,6 +1314,16 @@ public class NeteasePlaylistTrack
 {
     public int Id { get; set; }
     public long PlaylistExternalId { get; set; }
+    public long SongId { get; set; }
+    public string Title { get; set; } = "";
+    public string Artist { get; set; } = "";
+    public string Album { get; set; } = "";
+    public int DurationMs { get; set; }
+    public string CoverUrl { get; set; } = "";
+}
+
+public class NeteaseTrackMetadata
+{
     public long SongId { get; set; }
     public string Title { get; set; } = "";
     public string Artist { get; set; } = "";
