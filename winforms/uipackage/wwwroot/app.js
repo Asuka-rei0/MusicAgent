@@ -32,6 +32,7 @@
     let hasAutoRestoredPlayback = false;
     let pendingRestoreTime = 0;
     let lastPlaybackStateSavedAt = 0;
+    let isAutoAdvancing = false;
     let lyrics = [{ text: 'No lyrics loaded', time: 0 }];
     let aiConfig = loadAIConfig();
     let aiState = { isLoading: false, error: null };
@@ -369,6 +370,11 @@
             ? Number(progressData.currentIndex)
             : currentQueueIndex;
         playbackStrategy = progressData.playbackStrategy || playbackStrategy;
+        const status = String(progressData.status || '');
+
+        if (status !== 'Ended') {
+            isAutoAdvancing = false;
+        }
 
         if (progressData.errorMessage) {
             console.warn('AudioCore error:', progressData.errorMessage);
@@ -391,6 +397,11 @@
         }
 
         maybeSavePlaybackState();
+
+        if (status === 'Ended' && !isAutoAdvancing && Number(progressData.queueCount || 0) > 1) {
+            isAutoAdvancing = true;
+            sendToCSharp('next');
+        }
 
         if (currentView === 'library') {
             const playerBar = document.querySelector('.player-bar');
