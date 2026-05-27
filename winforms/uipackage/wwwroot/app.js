@@ -2613,19 +2613,22 @@
         return Math.max((value / maxHours) * 100, 8);
     }
 
+    function getWeeklyDayTotal(day) {
+        if (day.platforms?.length) {
+            return day.platforms.reduce((sum, slice) => sum + Number(slice.hours || 0), 0);
+        }
+        return Number(day.hours || 0);
+    }
+
     function getWeeklyMaxHours() {
-        const totals = weeklyData.map(day => {
-            if (day.platforms?.length) {
-                return day.platforms.reduce((sum, slice) => sum + Number(slice.hours || 0), 0);
-            }
-            return Number(day.hours || 0);
-        });
-        return Math.max(...totals, 0.1);
+        const totals = weeklyData.map(getWeeklyDayTotal);
+        const maxTotal = Math.max(...totals, 0.1);
+        return maxTotal / 0.88;
     }
 
     function renderWeeklyStackedBar(day, maxHours) {
         const platforms = day.platforms || [];
-        const total = platforms.reduce((sum, slice) => sum + Number(slice.hours || 0), 0) || Number(day.hours || 0);
+        const total = getWeeklyDayTotal(day);
         const barHeightPct = getWeeklyBarHeight(total, maxHours);
 
         if (total <= 0 || platforms.length === 0) {
