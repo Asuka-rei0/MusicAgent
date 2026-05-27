@@ -327,12 +327,20 @@ public class AudioService
             }
         }
 
-        var displayTitle = string.IsNullOrWhiteSpace(title)
+        var shouldUseNeteaseTitle = neteaseMetadata != null &&
+            (string.IsNullOrWhiteSpace(title) ||
+             title.Equals(sourceUri, StringComparison.OrdinalIgnoreCase) ||
+             title.StartsWith("netease:", StringComparison.OrdinalIgnoreCase));
+        var displayTitle = shouldUseNeteaseTitle
             ? (!string.IsNullOrWhiteSpace(neteaseMetadata?.Title)
                 ? neteaseMetadata.Title
                 : Path.GetFileNameWithoutExtension(resolvedPath))
             : title;
-        var displayArtist = string.IsNullOrWhiteSpace(artist)
+        var shouldUseNeteaseArtist = neteaseMetadata != null &&
+            (string.IsNullOrWhiteSpace(artist) ||
+             artist.Equals("Local file", StringComparison.OrdinalIgnoreCase) ||
+             artist.Equals("Unknown Artist", StringComparison.OrdinalIgnoreCase));
+        var displayArtist = shouldUseNeteaseArtist
             ? (!string.IsNullOrWhiteSpace(neteaseMetadata?.Artist) ? neteaseMetadata.Artist : "Unknown Artist")
             : artist;
         var displayDurationMs = manifestIndex.HasValue

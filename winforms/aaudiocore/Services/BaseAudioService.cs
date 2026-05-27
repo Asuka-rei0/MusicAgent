@@ -18,6 +18,8 @@ public abstract class BaseAudioService : IAudioService
 
     public int GetCurrentIndex() => currentIndex;
 
+    protected int QueueCount => queue.Count;
+
     public abstract void LoadMedia(string trackId, string sourceUri);
 
     public abstract void ExecuteCommand(PlayCommand command);

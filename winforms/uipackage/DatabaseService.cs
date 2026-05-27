@@ -37,6 +37,21 @@ public class DatabaseService
         {
             _context.Database.ExecuteSqlRaw("ALTER TABLE Settings ADD COLUMN LastPlaybackTime REAL NOT NULL DEFAULT 0");
         }
+
+        if (!columns.Contains(nameof(AppSettings.LastPlaybackQueueJson)))
+        {
+            _context.Database.ExecuteSqlRaw("ALTER TABLE Settings ADD COLUMN LastPlaybackQueueJson TEXT NOT NULL DEFAULT ''");
+        }
+
+        if (!columns.Contains(nameof(AppSettings.LastPlaybackQueueIndex)))
+        {
+            _context.Database.ExecuteSqlRaw("ALTER TABLE Settings ADD COLUMN LastPlaybackQueueIndex INTEGER NOT NULL DEFAULT -1");
+        }
+
+        if (!columns.Contains(nameof(AppSettings.LastPlaybackPlaylistJson)))
+        {
+            _context.Database.ExecuteSqlRaw("ALTER TABLE Settings ADD COLUMN LastPlaybackPlaylistJson TEXT NOT NULL DEFAULT ''");
+        }
     }
 
     private void EnsureSettings()
@@ -98,6 +113,9 @@ public class DatabaseService
                     existing.ColorFollowAlbum = settings.ColorFollowAlbum;
                     existing.LastTrackPath = settings.LastTrackPath;
                     existing.LastPlaybackTime = settings.LastPlaybackTime;
+                    existing.LastPlaybackQueueJson = settings.LastPlaybackQueueJson;
+                    existing.LastPlaybackQueueIndex = settings.LastPlaybackQueueIndex;
+                    existing.LastPlaybackPlaylistJson = settings.LastPlaybackPlaylistJson;
                 }
                 else
                 {
@@ -133,6 +151,9 @@ public class DatabaseService
 
             settings.LastTrackPath = request.LastTrackPath ?? string.Empty;
             settings.LastPlaybackTime = Math.Max(0, request.LastPlaybackTime);
+            settings.LastPlaybackQueueJson = request.LastPlaybackQueueJson ?? string.Empty;
+            settings.LastPlaybackQueueIndex = request.LastPlaybackQueueIndex;
+            settings.LastPlaybackPlaylistJson = request.LastPlaybackPlaylistJson ?? string.Empty;
             _context.SaveChanges();
 
             return new WebMessageResponse { Action = "savePlaybackState", Data = "Saved" };
@@ -431,6 +452,9 @@ public class PlaybackStateRequest
 {
     public string LastTrackPath { get; set; } = string.Empty;
     public double LastPlaybackTime { get; set; }
+    public string LastPlaybackQueueJson { get; set; } = string.Empty;
+    public int LastPlaybackQueueIndex { get; set; } = -1;
+    public string LastPlaybackPlaylistJson { get; set; } = string.Empty;
 }
 
 public class AppSettings
@@ -443,5 +467,8 @@ public class AppSettings
     public bool ColorFollowAlbum { get; set; } = true;
     public string LastTrackPath { get; set; } = string.Empty;
     public double LastPlaybackTime { get; set; }
+    public string LastPlaybackQueueJson { get; set; } = string.Empty;
+    public int LastPlaybackQueueIndex { get; set; } = -1;
+    public string LastPlaybackPlaylistJson { get; set; } = string.Empty;
 }
 

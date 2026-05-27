@@ -33,6 +33,8 @@
     let pendingRestoreTime = 0;
     let lastPlaybackStateSavedAt = 0;
     let isAutoAdvancing = false;
+    let activePlaybackQueue = [];
+    let activePlaybackPlaylist = null;
     let lyrics = [{ text: 'No lyrics loaded', time: 0 }];
     let aiConfig = loadAIConfig();
     let aiState = { isLoading: false, error: null };
@@ -1316,8 +1318,22 @@
             desktopLyrics: Boolean(source.desktopLyrics ?? source.DesktopLyrics ?? settings.desktopLyrics),
             colorFollowAlbum: Boolean(source.colorFollowAlbum ?? source.ColorFollowAlbum ?? settings.colorFollowAlbum),
             lastTrackPath: source.lastTrackPath ?? source.LastTrackPath ?? settings.lastTrackPath ?? '',
-            lastPlaybackTime: Number(source.lastPlaybackTime ?? source.LastPlaybackTime ?? settings.lastPlaybackTime ?? 0) || 0
+            lastPlaybackTime: Number(source.lastPlaybackTime ?? source.LastPlaybackTime ?? settings.lastPlaybackTime ?? 0) || 0,
+            lastPlaybackQueue: parseSavedJson(source.lastPlaybackQueueJson ?? source.LastPlaybackQueueJson, []),
+            lastPlaybackQueueIndex: Number(source.lastPlaybackQueueIndex ?? source.LastPlaybackQueueIndex ?? -1),
+            lastPlaybackPlaylist: parseSavedJson(source.lastPlaybackPlaylistJson ?? source.LastPlaybackPlaylistJson, null),
+            lastPlaybackQueueJson: source.lastPlaybackQueueJson ?? source.LastPlaybackQueueJson ?? '',
+            lastPlaybackPlaylistJson: source.lastPlaybackPlaylistJson ?? source.LastPlaybackPlaylistJson ?? ''
         };
+    }
+
+    function parseSavedJson(value, fallback) {
+        if (!value || typeof value !== 'string') return fallback;
+        try {
+            return JSON.parse(value);
+        } catch {
+            return fallback;
+        }
     }
 
     function applyTheme() {
@@ -1356,9 +1372,88 @@
         if (playlist) selectedPlaylist = playlist;
     }
 
+    function restoreSavedPlaylistContext(savedPlaylist, savedQueue) {
+        if (!savedPlaylist || typeof savedPlaylist !== 'object') return;
+
+        if (savedPlaylist.type === 'netease') {
+            const playlist = findNeteasePlaylistById(savedPlaylist.externalId);
+            selectedPlaylist = playlist || {
+                id: `netease-${savedPlaylist.externalId}`,
+                name: savedPlaylist.name || '网易云歌单',
+                isNetease: true,
+                externalId: savedPlaylist.externalId,
+                cover: savedPlaylist.cover || savedPlaylist.coverUrl || getDefaultCover()
+            };
+            neteaseTracks = savedQueue.map(normalizeTrack);
+            return;
+        }
+
+        if (savedPlaylist.type === 'ai') {
+            selectedPlaylist = {
+                id: 'ai-recommendations',
+                name: savedPlaylist.name || aiRecommendationPlaylistName,
+                isAIRecommendation: true
+            };
+            aiRecommendedTracks = savedQueue.map(normalizeTrack);
+            return;
+        }
+
+        if (savedPlaylist.type === 'local' && savedPlaylist.path) {
+            selectedPlaylist = getLibraryPlaylists().find(item =>
+                item.isLocal && item.path === savedPlaylist.path
+            ) || selectedPlaylist;
+        }
+    }
+
+    function tryRestoreSavedQueue() {
+        const savedQueue = Array.isArray(settings.lastPlaybackQueue)
+            ? settings.lastPlaybackQueue.map(normalizeTrack).filter(track => getTrackSource(track))
+            : [];
+        if (savedQueue.length === 0) return false;
+
+        const savedSource = settings.lastTrackPath;
+        const savedIndex = Number.isFinite(settings.lastPlaybackQueueIndex)
+            ? settings.lastPlaybackQueueIndex
+            : -1;
+        const sourceIndex = savedQueue.findIndex(track =>
+            normalizePathForCompare(getTrackSource(track)) === normalizePathForCompare(savedSource)
+        );
+        const queueIndex = Math.min(
+            Math.max(sourceIndex >= 0 ? sourceIndex : savedIndex, 0),
+            savedQueue.length - 1
+        );
+        const selected = savedQueue[queueIndex];
+        if (!selected) return false;
+
+        restoreSavedPlaylistContext(settings.lastPlaybackPlaylist, savedQueue);
+        activePlaybackQueue = getPlayableQueue(savedQueue);
+        activePlaybackPlaylist = settings.lastPlaybackPlaylist || null;
+        pendingRestoreTime = Math.max(0, Number(settings.lastPlaybackTime) || 0);
+        hasAutoRestoredPlayback = true;
+
+        currentFilePath = getTrackSource(selected);
+        currentSourceUri = getTrackSource(selected);
+        currentTrackTitle = selected.title;
+        currentTrackArtist = selected.artist;
+        currentCoverUrl = getTrackCover(selected);
+        currentQueueIndex = queueIndex;
+        isPlaying = true;
+        requestLyricsForSource(currentSourceUri);
+
+        sendToCSharp('setQueue', JSON.stringify({
+            tracks: activePlaybackQueue,
+            startIndex: queueIndex,
+            autoPlay: true
+        }));
+        renderPlayer();
+        return true;
+    }
+
     function tryAutoRestorePlayback() {
         if (hasAutoRestoredPlayback || !settings.autoPlay || !settings.lastTrackPath) return;
         if (!hasLoadedLocalPaths) return;
+
+        if (tryRestoreSavedQueue()) return;
 
         const trackIndex = findTrackIndexByPath(settings.lastTrackPath);
         if (trackIndex >= 0) {
@@ -1387,9 +1482,17 @@
         lastPlaybackStateSavedAt = now;
         settings.lastTrackPath = playbackSource;
         settings.lastPlaybackTime = Math.max(0, Number(playbackTime) || 0);
+        settings.lastPlaybackQueue = activePlaybackQueue;
+        settings.lastPlaybackQueueIndex = currentQueueIndex;
+        settings.lastPlaybackPlaylist = activePlaybackPlaylist;
+        settings.lastPlaybackQueueJson = JSON.stringify(activePlaybackQueue);
+        settings.lastPlaybackPlaylistJson = JSON.stringify(activePlaybackPlaylist);
         sendToCSharp('savePlaybackState', JSON.stringify({
             lastTrackPath: settings.lastTrackPath,
-            lastPlaybackTime: settings.lastPlaybackTime
+            lastPlaybackTime: settings.lastPlaybackTime,
+            lastPlaybackQueueJson: settings.lastPlaybackQueueJson,
+            lastPlaybackQueueIndex: currentQueueIndex,
+            lastPlaybackPlaylistJson: settings.lastPlaybackPlaylistJson
         }));
     }
 
@@ -1449,6 +1552,7 @@
         currentTrackTitle = title;
         currentTrackArtist = artist;
         isPlaying = true;
+        rememberPlaybackQueue([{ id: filePath, title, artist, sourceUri: filePath, coverUrl: currentCoverUrl || '' }], 0, null);
         requestLyricsForSource(filePath);
         if (!options.skipSave) savePlaybackState(0, true);
         sendToCSharp('play', JSON.stringify({ filePath, title, artist, coverUrl: currentCoverUrl || '' }));
@@ -1465,6 +1569,40 @@
             coverUrl: track.coverUrl || '',
             durationMs: track.durationMs || null
         };
+    }
+
+    function capturePlaylistContext() {
+        if (selectedPlaylist?.isNetease) {
+            return {
+                type: 'netease',
+                externalId: selectedPlaylist.externalId,
+                name: selectedPlaylist.name,
+                cover: selectedPlaylist.cover
+            };
+        }
+
+        if (selectedPlaylist?.isAIRecommendation) {
+            return {
+                type: 'ai',
+                name: selectedPlaylist.name || aiRecommendationPlaylistName
+            };
+        }
+
+        if (selectedPlaylist?.isLocal) {
+            return {
+                type: 'local',
+                path: selectedPlaylist.path,
+                name: selectedPlaylist.name
+            };
+        }
+
+        return null;
+    }
+
+    function rememberPlaybackQueue(queue, queueIndex, playlistContext = capturePlaylistContext()) {
+        activePlaybackQueue = Array.isArray(queue) ? queue.map(toQueueTrack).filter(track => track.sourceUri) : [];
+        currentQueueIndex = Number.isFinite(Number(queueIndex)) ? Number(queueIndex) : currentQueueIndex;
+        activePlaybackPlaylist = playlistContext;
     }
 
     function getTrackCover(track) {
@@ -1508,6 +1646,7 @@
         currentCoverUrl = getTrackCover(selected);
         currentQueueIndex = index;
         isPlaying = true;
+        rememberPlaybackQueue(queue, startIndex >= 0 ? startIndex : index);
 
         requestLyricsForSource(sourceUri);
         if (!options.skipSave) savePlaybackState(0, true);
@@ -1567,13 +1706,14 @@
             selectedPlaylist = null;
         }
 
-        currentFilePath = payload.filePath || selectedSource;
-        currentSourceUri = payload.logicalSourceUri || payload.trackId || payload.sourceUri || selectedSource;
+        currentFilePath = selectedSource;
+        currentSourceUri = selectedSource;
         currentTrackTitle = selected.title;
         currentTrackArtist = selected.artist;
         currentCoverUrl = getTrackCover(selected);
         currentQueueIndex = queueIndex;
         isPlaying = true;
+        rememberPlaybackQueue(queue, queueIndex);
 
         requestLyricsForSource(currentSourceUri);
         if (!options.skipSave) savePlaybackState(0, true);
@@ -1610,6 +1750,7 @@
             startIndex: queueIndex,
             autoPlay: true
         }), options.timeoutMs || 90000);
+        rememberPlaybackQueue(queue, queueIndex);
 
         currentFilePath = selectedSource;
         currentSourceUri = selectedSource;

@@ -221,7 +221,7 @@ public sealed class NAudioAudioService : BaseAudioService
 
         if (audioFile != null && audioFile.CurrentTime >= audioFile.TotalTime)
         {
-            if (shouldAutoplay && PlayNext()) return;
+            if (shouldAutoplay && QueueCount > 1 && PlayNext()) return;
             UpdateStateFromReader(PlaybackStatus.Ended);
         }
     }
