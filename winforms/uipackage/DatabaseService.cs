@@ -195,6 +195,95 @@ public class DatabaseService
         return new WebMessageResponse { Action = "getPlatformData", Data = JsonSerializer.Serialize(data) };
     }
 
+    public WebMessageResponse GetListeningInsights()
+    {
+        try
+        {
+            DeleteOldListeningHistory();
+
+            var since = DateTime.Today.AddDays(-6);
+            var history = _context.ListeningHistory
+                .Where(item => item.ListenedAt >= since)
+                .ToList();
+
+            var totalSeconds = history.Sum(item => item.DurationSeconds);
+            var platforms = history
+                .GroupBy(item => item.Platform)
+                .Select(group => new
+                {
+                    name = FormatPlatformDisplayName(group.Key),
+                    rawName = group.Key,
+                    durationSeconds = Math.Round(group.Sum(item => item.DurationSeconds), 1),
+                    hours = Math.Round(group.Sum(item => item.DurationSeconds) / 3600.0, 2),
+                    playCount = group.Count(),
+                    color = GetPlatformColor(group.Key)
+                })
+                .OrderByDescending(item => item.durationSeconds)
+                .ToList();
+
+            var topTracks = history
+                .GroupBy(item => new { item.TrackPath, item.Platform })
+                .Select(group => new
+                {
+                    trackPath = group.Key.TrackPath,
+                    platform = FormatPlatformDisplayName(group.Key.Platform),
+                    rawPlatform = group.Key.Platform,
+                    title = GetTrackInsightTitle(group.Key.TrackPath),
+                    songId = ExtractNeteaseSongId(group.Key.TrackPath),
+                    durationSeconds = Math.Round(group.Sum(item => item.DurationSeconds), 1),
+                    hours = Math.Round(group.Sum(item => item.DurationSeconds) / 3600.0, 2),
+                    playCount = group.Count(),
+                    lastListenedAt = group.Max(item => item.ListenedAt).ToString("o")
+                })
+                .OrderByDescending(item => item.durationSeconds)
+                .ThenByDescending(item => item.lastListenedAt)
+                .Take(8)
+                .ToList();
+
+            var bucketDefinitions = new[]
+            {
+                new { key = "morning", label = "Morning", color = "#F59E0B" },
+                new { key = "afternoon", label = "Afternoon", color = "#38BDF8" },
+                new { key = "evening", label = "Evening", color = "#A855F7" },
+                new { key = "night", label = "Night", color = "#6366F1" }
+            };
+            var timeBuckets = bucketDefinitions
+                .Select(bucket =>
+                {
+                    var items = history.Where(item => GetTimeBucket(item.ListenedAt) == bucket.key).ToList();
+                    return new
+                    {
+                        bucket.key,
+                        bucket.label,
+                        bucket.color,
+                        durationSeconds = Math.Round(items.Sum(item => item.DurationSeconds), 1),
+                        hours = Math.Round(items.Sum(item => item.DurationSeconds) / 3600.0, 2),
+                        playCount = items.Count
+                    };
+                })
+                .OrderByDescending(item => item.durationSeconds)
+                .ToList();
+
+            var payload = new
+            {
+                since = since.ToString("o"),
+                totalSeconds = Math.Round(totalSeconds, 1),
+                totalHours = Math.Round(totalSeconds / 3600.0, 2),
+                platforms,
+                topTracks,
+                preferredPlatform = platforms.FirstOrDefault()?.name ?? "",
+                preferredTimeBucket = timeBuckets.FirstOrDefault(item => item.durationSeconds > 0)?.label ?? "",
+                timeBuckets
+            };
+
+            return new WebMessageResponse { Action = "getListeningInsights", Data = JsonSerializer.Serialize(payload) };
+        }
+        catch (Exception ex)
+        {
+            return new WebMessageResponse { Action = "getListeningInsights", Data = JsonSerializer.Serialize(new { success = false, errorMessage = ex.Message }) };
+        }
+    }
+
     public WebMessageResponse RecordListeningTime(string data)
     {
         try
@@ -225,6 +314,48 @@ public class DatabaseService
 
     private static string FormatPlatformDisplayName(string platform) =>
         platform.Equals("netease", StringComparison.OrdinalIgnoreCase) ? "网易云" : platform;
+
+    private static string GetTimeBucket(DateTime listenedAt)
+    {
+        var hour = listenedAt.Hour;
+        if (hour is >= 5 and < 12) return "morning";
+        if (hour is >= 12 and < 18) return "afternoon";
+        if (hour is >= 18 and < 24) return "evening";
+        return "night";
+    }
+
+    private static long ExtractNeteaseSongId(string trackPath)
+    {
+        if (!trackPath.StartsWith("netease:", StringComparison.OrdinalIgnoreCase)) return 0;
+
+        var idPart = trackPath["netease:".Length..].Split(':', 2)[0];
+        return long.TryParse(idPart, out var songId) ? songId : 0;
+    }
+
+    private static string GetTrackInsightTitle(string trackPath)
+    {
+        if (trackPath.StartsWith("netease:", StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = trackPath.Split(':', 3);
+            if (parts.Length >= 3 && !string.IsNullOrWhiteSpace(parts[2]))
+            {
+                return parts[2];
+            }
+
+            var songId = ExtractNeteaseSongId(trackPath);
+            return songId > 0 ? $"NetEase song {songId}" : "NetEase song";
+        }
+
+        try
+        {
+            var fileName = Path.GetFileNameWithoutExtension(trackPath);
+            return string.IsNullOrWhiteSpace(fileName) ? trackPath : fileName;
+        }
+        catch
+        {
+            return trackPath;
+        }
+    }
 
     private static string GetPlatformColor(string platform)
     {

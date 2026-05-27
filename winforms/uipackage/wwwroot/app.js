@@ -37,6 +37,7 @@
     let aiConfig = loadAIConfig();
     let aiState = { isLoading: false, error: null };
     let aiRecommendedTracks = [];
+    let aiRecommendationPlaylistName = 'AI Recommendations';
     let neteaseStatus = {
         loggedIn: false,
         nickname: '',
@@ -52,11 +53,23 @@
     let neteaseQrPollTimer = null;
     let isNeteaseSyncing = false;
     let isLoadingNeteaseTracks = false;
+    let neteaseTopCharts = [];
+    let neteaseMoodTags = [];
+    let listeningInsights = null;
+    let isLoadingNeteaseTopCharts = false;
+    let isLoadingNeteaseMoodTags = false;
+    let isLoadingExploreTracks = false;
+    let startListeningState = { isLoading: false, error: '' };
+    let lastAssistantPlaybackContext = null;
+    let messageSequence = 0;
+    let shouldScrollLibraryTrackList = false;
+    const pendingRequests = new Map();
     const aiSystemPrompt = [
         'You are an AI music assistant for MusicAgent.',
         'Help users discover music based on mood, preferences, and listening habits.',
         'Keep responses concise, friendly, and music-focused.',
-        'When recommending, mention specific songs or artists when possible.'
+        'When recommending, mention specific songs or artists when possible.',
+        'The current playback state supplied by MusicAgent is the source of truth; never infer the now-playing song from earlier chat messages.'
     ].join(' ');
 
     const navItems = [
@@ -88,7 +101,9 @@
         const response = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
         const action = response.action || response.Action;
         const data = response.data ?? response.Data;
+        const id = response.id || response.Id;
         console.log('Received from C#:', response);
+        resolvePendingRequest(id, action, data, response);
         
         switch (action) {
             case 'error':
@@ -113,6 +128,9 @@
                     color: item.color ?? item.Color ?? '#8B5CF6'
                 }));
                 if (currentView === 'library') renderLibraryStats();
+                break;
+            case 'getListeningInsights':
+                applyListeningInsights(data);
                 break;
             case 'getLocalPaths':
                 localPaths = normalizeLocalPaths(JSON.parse(data));
@@ -178,6 +196,9 @@
                     neteasePlaylists = [];
                     neteaseTracks = [];
                 }
+                if (action === 'setNeteaseApiBaseUrl') {
+                    reloadNeteaseExploreData();
+                }
                 render();
                 break;
             case 'neteaseQrStart':
@@ -195,6 +216,16 @@
                 break;
             case 'getNeteasePlaylistTracks':
                 applyNeteasePlaylistTracks(data);
+                break;
+            case 'getNeteaseTopCharts':
+                applyNeteaseTopCharts(data);
+                break;
+            case 'getNeteaseMoodTags':
+                applyNeteaseMoodTags(data);
+                break;
+            case 'getNeteaseExploreTracks':
+            case 'getNeteaseMoodTracks':
+                applyNeteaseExploreTracks(data);
                 break;
         }
     }
@@ -218,6 +249,21 @@
 
     function getMainScrollEl() {
         return document.querySelector('.main-content');
+    }
+
+    function scrollLibraryTrackListIntoView(behavior = 'smooth') {
+        shouldScrollLibraryTrackList = true;
+        requestAnimationFrame(() => {
+            const scroller = getMainScrollEl();
+            const target = document.getElementById('library-track-list');
+            if (!scroller || !target || currentView !== 'library') return;
+
+            shouldScrollLibraryTrackList = false;
+            scroller.scrollTo({
+                top: Math.max(target.offsetTop - 16, 0),
+                behavior
+            });
+        });
     }
 
     function renderPreservingMainScroll() {
@@ -318,6 +364,7 @@
         if (payload?.errorMessage) {
             alert(payload.errorMessage);
             render();
+            if (currentView === 'library') scrollLibraryTrackListIntoView('auto');
             return;
         }
 
@@ -326,11 +373,94 @@
             console.warn('曲目缺少封面，请在设置中重新「同步网易云」。');
         }
         render();
+        if (currentView === 'library') scrollLibraryTrackListIntoView('auto');
 
         if (neteaseTracks.length === 0) {
             alert(payload?.message || '该歌单暂无曲目，请重新同步网易云数据。');
             return;
         }
+    }
+
+    function applyNeteaseTopCharts(data) {
+        isLoadingNeteaseTopCharts = false;
+        const payload = parseJsonData(data);
+        if (payload?.errorMessage || payload?.success === false) {
+            console.warn('NetEase charts failed:', payload?.errorMessage || payload?.message || data);
+            if (currentView === 'explore') render();
+            return;
+        }
+
+        neteaseTopCharts = Array.isArray(payload?.charts)
+            ? payload.charts.map(normalizeNeteaseChart).filter(chart => chart.playlistId)
+            : [];
+        if (currentView === 'explore') render();
+    }
+
+    function applyNeteaseMoodTags(data) {
+        isLoadingNeteaseMoodTags = false;
+        const payload = parseJsonData(data);
+        if (payload?.errorMessage || payload?.success === false) {
+            console.warn('NetEase mood tags failed:', payload?.errorMessage || payload?.message || data);
+            if (currentView === 'explore') render();
+            return;
+        }
+
+        neteaseMoodTags = Array.isArray(payload?.tags)
+            ? payload.tags.map(normalizeNeteaseMoodTag).filter(tag => tag.name)
+            : [];
+        if (currentView === 'explore') render();
+    }
+
+    function applyNeteaseExploreTracks(data) {
+        isLoadingExploreTracks = false;
+        const payload = parseJsonData(data);
+        if (payload?.errorMessage || payload?.success === false) {
+            const message = payload?.errorMessage || payload?.message || '网易云曲目加载失败';
+            startListeningState = { isLoading: false, error: message };
+            render();
+            return;
+        }
+
+        if (currentView === 'explore' || currentView === 'ai-recommend') {
+            render();
+        }
+    }
+
+    function applyListeningInsights(data) {
+        const payload = parseJsonData(data);
+        if (!payload || payload.success === false) {
+            console.warn('Listening insights failed:', payload?.errorMessage || data);
+            return;
+        }
+
+        listeningInsights = payload;
+    }
+
+    function normalizeNeteaseChart(chart) {
+        const tracks = chart.tracks ?? chart.Tracks ?? [];
+        return {
+            playlistId: chart.playlistId ?? chart.PlaylistId ?? chart.id ?? chart.Id,
+            name: chart.name ?? chart.Name ?? '网易云榜单',
+            description: chart.description ?? chart.Description ?? '',
+            coverUrl: chart.coverUrl ?? chart.CoverUrl ?? '',
+            trackCount: Number(chart.trackCount ?? chart.TrackCount ?? 0),
+            updateFrequency: chart.updateFrequency ?? chart.UpdateFrequency ?? '',
+            tracks: Array.isArray(tracks)
+                ? tracks.map(track => ({
+                    title: track.title ?? track.Title ?? '',
+                    artist: track.artist ?? track.Artist ?? ''
+                })).filter(track => track.title)
+                : []
+        };
+    }
+
+    function normalizeNeteaseMoodTag(tag) {
+        return {
+            name: tag.name ?? tag.Name ?? '',
+            category: tag.category ?? tag.Category ?? '',
+            hot: Boolean(tag.hot ?? tag.Hot),
+            source: tag.source ?? tag.Source ?? ''
+        };
     }
 
     function stopNeteaseQrPoll() {
@@ -443,7 +573,7 @@
                     trackCount: scanData.count ?? scannedTracks.length
                 };
                 if (selectedPlaylist?.isLocal && selectedPlaylist.path === scannedPath) {
-                    selectedPlaylist = getLibraryPlaylists()[pathIndex];
+                    selectedPlaylist = getLibraryPlaylists().find(playlist => playlist.isLocal && playlist.path === scannedPath) || selectedPlaylist;
                 }
             }
         }
@@ -458,6 +588,9 @@
 
         if (scannedTracks.length === 0) {
             alert('Scan completed, but no supported audio files were found in this folder.');
+        }
+        if (currentView === 'library' && selectedPlaylist?.isLocal && scannedPath && selectedPlaylist.path === scannedPath) {
+            shouldScrollLibraryTrackList = true;
         }
         tryAutoRestorePlayback();
     }
@@ -509,8 +642,14 @@
 
     function syncSelectedPlaylistWithLocalPaths() {
         const libraryPlaylists = getLibraryPlaylists();
+        if (selectedPlaylist?.isExploreChart) return;
         if (libraryPlaylists.length === 0) {
             selectedPlaylist = null;
+            return;
+        }
+
+        if (selectedPlaylist?.isAIRecommendation) {
+            selectedPlaylist = libraryPlaylists.find(playlist => playlist.isAIRecommendation) || libraryPlaylists[0];
             return;
         }
 
@@ -525,7 +664,41 @@
         }
     }
 
+    function getAIRecommendationPlaylist() {
+        const recommendationTracks = uniqueTracks(aiRecommendedTracks).slice(0, 5);
+        if (recommendationTracks.length === 0) return null;
+
+        return {
+            id: 'ai-recommendations',
+            isLocal: false,
+            isNetease: false,
+            isAIRecommendation: true,
+            name: aiRecommendationPlaylistName || 'AI Recommendations',
+            tracks: recommendationTracks.length,
+            duration: 'AI 推荐',
+            cover: getTrackCover(recommendationTracks[0]),
+            path: ''
+        };
+    }
+
+    function selectAIRecommendationPlaylist() {
+        const playlist = getAIRecommendationPlaylist();
+        if (playlist) selectedPlaylist = playlist;
+        return playlist;
+    }
+
+    function setAIRecommendations(trackList, playlistName = 'AI Recommendations') {
+        aiRecommendedTracks = uniqueTracks(trackList).slice(0, 5);
+        aiRecommendationPlaylistName = playlistName || 'AI Recommendations';
+        const playlist = selectAIRecommendationPlaylist();
+        if (!playlist && selectedPlaylist?.isAIRecommendation) {
+            selectedPlaylist = getLibraryPlaylists()[0] || null;
+        }
+        return playlist;
+    }
+
     function getLibraryPlaylists() {
+        const aiRecommendationPlaylist = getAIRecommendationPlaylist();
         const cloud = neteasePlaylists.map(playlist => ({
             id: `netease-${playlist.externalId}`,
             externalId: playlist.externalId,
@@ -548,7 +721,11 @@
             cover: getDefaultCover(),
             path: path.path
         }));
-        return [...cloud, ...local];
+        return [
+            ...(aiRecommendationPlaylist ? [aiRecommendationPlaylist] : []),
+            ...cloud,
+            ...local
+        ];
     }
 
     function parseNeteaseSongId(source) {
@@ -581,6 +758,9 @@
     }
 
     function getActiveTrackList() {
+        if (selectedPlaylist?.isAIRecommendation) {
+            return aiRecommendedTracks;
+        }
         if (selectedPlaylist?.isNetease) {
             return neteaseTracks;
         }
@@ -604,6 +784,7 @@
         isLoadingNeteaseTracks = true;
         neteaseTracks = [];
         render();
+        scrollLibraryTrackListIntoView();
         sendToCSharp('getNeteasePlaylistTracks', JSON.stringify({ playlistId: String(playlistId) }));
     }
 
@@ -698,18 +879,107 @@
         localStorage.setItem('musicagent.ai.config', JSON.stringify(aiConfig));
     }
 
+    function isMeaningfulTrackTitle(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        return normalized && normalized !== 'unknown track' && normalized !== 'no track selected';
+    }
+
+    function isMeaningfulArtist(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        return normalized && normalized !== 'unknown artist' && normalized !== 'choose a track';
+    }
+
+    function getTrackSource(track) {
+        return track?.sourceUri || track?.filePath || '';
+    }
+
+    function isNeteaseSource(source) {
+        return String(source || '').startsWith('netease:');
+    }
+
+    function findTrackBySource(source) {
+        const normalizedSource = normalizePathForCompare(source);
+        if (!normalizedSource) return null;
+
+        return [...aiRecommendedTracks, ...neteaseTracks, ...tracks]
+            .map(normalizeTrack)
+            .find(track => {
+                const trackSource = getTrackSource(track);
+                return normalizePathForCompare(trackSource) === normalizedSource;
+            }) || null;
+    }
+
+    function getNowPlayingSnapshot() {
+        const source = currentSourceUri || currentFilePath;
+        const knownTrack = findTrackBySource(source);
+        const title = isMeaningfulTrackTitle(currentTrackTitle)
+            ? currentTrackTitle
+            : (knownTrack?.title || (source ? getFileNameWithoutExtension(source) : ''));
+        const artist = isMeaningfulArtist(currentTrackArtist)
+            ? currentTrackArtist
+            : (knownTrack?.artist || 'Unknown Artist');
+        const hasTrack = Boolean(source || isMeaningfulTrackTitle(title));
+        const track = hasTrack
+            ? normalizeTrack({
+                id: knownTrack?.id || source || title,
+                songId: knownTrack?.songId || parseNeteaseSongId(source),
+                isNetease: knownTrack?.isNetease || isNeteaseSource(source),
+                title,
+                artist,
+                album: knownTrack?.album || (isNeteaseSource(source) ? '网易云音乐' : 'Local Music'),
+                duration: duration ? formatTime(duration) : (knownTrack?.duration || '--:--'),
+                durationMs: duration ? duration * 1000 : (knownTrack?.durationMs || null),
+                coverUrl: currentCoverUrl || knownTrack?.coverUrl || '',
+                filePath: isNeteaseSource(source) ? '' : source,
+                sourceUri: source
+            })
+            : null;
+
+        return {
+            hasTrack,
+            track,
+            sourceUri: source,
+            title,
+            artist,
+            isPlaying,
+            currentTime,
+            duration,
+            volume
+        };
+    }
+
+    function getPlaybackContextForAI() {
+        const snapshot = getNowPlayingSnapshot();
+        if (!snapshot.hasTrack || !snapshot.track) {
+            return 'Current actual playback: no song is selected in the player.';
+        }
+
+        const status = snapshot.isPlaying ? 'playing' : 'paused';
+        const progressText = snapshot.duration > 0
+            ? `${formatTime(snapshot.currentTime)} / ${formatTime(snapshot.duration)}`
+            : `${formatTime(snapshot.currentTime)}`;
+        return [
+            `Current actual playback (${status}): ${snapshot.track.title} - ${snapshot.track.artist}.`,
+            `Source: ${snapshot.track.isNetease ? 'NetEase Cloud Music' : 'Local Music Library'} (${snapshot.sourceUri || 'unknown source'}).`,
+            `Volume: ${snapshot.volume}%. Progress: ${progressText}.`,
+            'If the user asks what is playing or why this song is playing, answer with this exact song and explain from this state.'
+        ].join('\n');
+    }
+
     function getChatContext() {
         const localTrackHints = tracks
             .slice(0, 20)
             .map(track => `${track.title || getFileNameWithoutExtension(track.filePath || '')} - ${track.artist || 'Unknown Artist'}`)
             .join('\n');
 
-        return localTrackHints
+        const libraryText = localTrackHints
             ? `Local library candidates:\n${localTrackHints}`
             : 'The local library is empty or still scanning.';
+        return `${getPlaybackContextForAI()}\n\n${libraryText}`;
     }
 
     function getAIConversationMessages(userContent) {
+        const latestUserContent = String(userContent || '').trim();
         const recentMessages = messages
             .slice(-8)
             .filter(msg => msg.content && msg.type !== 'system')
@@ -717,10 +987,15 @@
                 role: msg.type === 'user' ? 'user' : 'assistant',
                 content: msg.content
             }));
+        const lastMessage = recentMessages[recentMessages.length - 1];
+        const shouldAppendLatest =
+            latestUserContent &&
+            (!lastMessage || lastMessage.role !== 'user' || lastMessage.content !== latestUserContent);
 
         return [
             { role: 'system', content: `${aiSystemPrompt}\n${getChatContext()}` },
-            ...recentMessages
+            ...recentMessages,
+            ...(shouldAppendLatest ? [{ role: 'user', content: latestUserContent }] : [])
         ];
     }
 
@@ -984,13 +1259,48 @@
         });
     }
 
-    function sendToCSharp(action, data = '') {
-        const message = { id: Date.now().toString(), action, data };
+    function nextMessageId() {
+        messageSequence += 1;
+        return `${Date.now()}-${messageSequence}`;
+    }
+
+    function postToCSharp(message) {
         if (window.chrome && window.chrome.webview) {
             window.chrome.webview.postMessage(JSON.stringify(message));
         } else {
             console.log('Mock message to C#:', message);
         }
+    }
+
+    function sendToCSharp(action, data = '') {
+        postToCSharp({ id: nextMessageId(), action, data });
+    }
+
+    function requestFromCSharp(action, data = '', timeoutMs = 30000) {
+        if (!(window.chrome && window.chrome.webview)) {
+            return Promise.reject(new Error('Desktop WebView bridge is unavailable.'));
+        }
+
+        const id = nextMessageId();
+        const message = { id, action, data };
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                pendingRequests.delete(id);
+                reject(new Error(`${action} timed out.`));
+            }, timeoutMs);
+
+            pendingRequests.set(id, { resolve, reject, timer });
+            postToCSharp(message);
+        });
+    }
+
+    function resolvePendingRequest(id, action, data, response) {
+        if (!id || !pendingRequests.has(id)) return;
+
+        const pending = pendingRequests.get(id);
+        pendingRequests.delete(id);
+        clearTimeout(pending.timer);
+        pending.resolve({ action, data, response });
     }
 
     function normalizeTheme(theme) {
@@ -1088,12 +1398,22 @@
         savePlaybackState(currentTime);
     }
 
+    function reloadNeteaseExploreData() {
+        neteaseTopCharts = [];
+        neteaseMoodTags = [];
+        isLoadingNeteaseTopCharts = true;
+        isLoadingNeteaseMoodTags = true;
+        sendToCSharp('getNeteaseTopCharts');
+        sendToCSharp('getNeteaseMoodTags');
+    }
+
     function loadInitialData() {
         sendToCSharp('getWeeklyData');
         sendToCSharp('getPlatformData');
         sendToCSharp('getLocalPaths');
         sendToCSharp('getSettings');
         sendToCSharp('getNeteaseStatus');
+        reloadNeteaseExploreData();
     }
 
     function startProgressTimer() {
@@ -1131,7 +1451,7 @@
         isPlaying = true;
         requestLyricsForSource(filePath);
         if (!options.skipSave) savePlaybackState(0, true);
-        sendToCSharp('play', JSON.stringify({ filePath }));
+        sendToCSharp('play', JSON.stringify({ filePath, title, artist, coverUrl: currentCoverUrl || '' }));
         renderPlayer();
     }
 
@@ -1214,6 +1534,884 @@
         }
 
         playVisibleTrack(Math.max(0, getActiveTrackList().findIndex(track => track === selected)), options);
+    }
+
+    function uniqueTracks(trackList) {
+        const seen = new Set();
+        const result = [];
+        trackList.forEach(track => {
+            const normalized = normalizeTrack(track);
+            const source = normalized.sourceUri || normalized.filePath;
+            if (!source) return;
+
+            const key = normalizePathForCompare(source);
+            if (seen.has(key)) return;
+
+            seen.add(key);
+            result.push(normalized);
+        });
+        return result;
+    }
+
+    function playTrackCollection(trackList, startIndex = 0, options = {}) {
+        const normalizedTracks = uniqueTracks(trackList);
+        const queue = getPlayableQueue(normalizedTracks);
+        if (queue.length === 0) return false;
+
+        const queueIndex = Math.min(Math.max(startIndex, 0), queue.length - 1);
+        const selectedSource = queue[queueIndex].sourceUri;
+        const selected = normalizedTracks.find(track => (track.sourceUri || track.filePath) === selectedSource) || normalizedTracks[queueIndex];
+        if (!selected) return false;
+
+        if (options.detachPlaylist) {
+            selectedPlaylist = null;
+        }
+
+        currentFilePath = payload.filePath || selectedSource;
+        currentSourceUri = payload.logicalSourceUri || payload.trackId || payload.sourceUri || selectedSource;
+        currentTrackTitle = selected.title;
+        currentTrackArtist = selected.artist;
+        currentCoverUrl = getTrackCover(selected);
+        currentQueueIndex = queueIndex;
+        isPlaying = true;
+
+        requestLyricsForSource(currentSourceUri);
+        if (!options.skipSave) savePlaybackState(0, true);
+
+        sendToCSharp('setQueue', JSON.stringify({
+            tracks: queue,
+            startIndex: queueIndex,
+            autoPlay: true
+        }));
+        renderPlayer();
+        return true;
+    }
+
+    async function playTrackCollectionConfirmed(trackList, startIndex = 0, options = {}) {
+        const normalizedTracks = uniqueTracks(trackList);
+        const queue = getPlayableQueue(normalizedTracks);
+        if (queue.length === 0) {
+            throw new Error('没有可播放的音频源。');
+        }
+
+        const queueIndex = Math.min(Math.max(startIndex, 0), queue.length - 1);
+        const selectedSource = queue[queueIndex].sourceUri;
+        const selected = normalizedTracks.find(track => getTrackSource(track) === selectedSource) || normalizedTracks[queueIndex];
+        if (!selected) {
+            throw new Error('没有找到要播放的歌曲。');
+        }
+
+        if (options.detachPlaylist) {
+            selectedPlaylist = null;
+        }
+
+        const payload = await requestJsonFromCSharp('setQueue', JSON.stringify({
+            tracks: queue,
+            startIndex: queueIndex,
+            autoPlay: true
+        }), options.timeoutMs || 90000);
+
+        currentFilePath = selectedSource;
+        currentSourceUri = selectedSource;
+        currentTrackTitle = payload.title || selected.title;
+        currentTrackArtist = payload.artist || selected.artist;
+        currentCoverUrl = payload.coverUrl || getTrackCover(selected);
+        currentQueueIndex = Number.isFinite(Number(payload.currentIndex)) ? Number(payload.currentIndex) : queueIndex;
+        isPlaying = Boolean(payload.isPlaying ?? true);
+        requestLyricsForSource(selectedSource);
+        if (!options.skipSave) savePlaybackState(0, true);
+        renderPlayer();
+
+        return {
+            state: payload,
+            track: normalizeTrack({
+                ...selected,
+                title: payload.title || selected.title,
+                artist: payload.artist || selected.artist,
+                coverUrl: payload.coverUrl || selected.coverUrl,
+                sourceUri: payload.logicalSourceUri || payload.trackId || selectedSource
+            })
+        };
+    }
+
+    async function requestJsonFromCSharp(action, data = '', timeoutMs = 30000) {
+        const result = await requestFromCSharp(action, data, timeoutMs);
+        const payload = parseJsonData(result.data);
+        if (!payload || typeof payload !== 'object') {
+            throw new Error(`${action} returned an empty response.`);
+        }
+        if (payload.errorMessage || payload.success === false) {
+            throw new Error(payload.errorMessage || payload.message || `${action} failed.`);
+        }
+        return payload;
+    }
+
+    async function ensureNeteaseCharts() {
+        if (neteaseTopCharts.length > 0) return neteaseTopCharts;
+
+        isLoadingNeteaseTopCharts = true;
+        if (currentView === 'explore') render();
+        const payload = await requestJsonFromCSharp('getNeteaseTopCharts', '', 30000);
+        neteaseTopCharts = Array.isArray(payload.charts)
+            ? payload.charts.map(normalizeNeteaseChart).filter(chart => chart.playlistId)
+            : [];
+        isLoadingNeteaseTopCharts = false;
+        return neteaseTopCharts;
+    }
+
+    function chooseStarterChart() {
+        return neteaseTopCharts.find(chart => chart.name.includes('热歌')) || neteaseTopCharts[0] || null;
+    }
+
+    async function fetchNeteaseChartTracks(playlistId, title, source = 'explore', options = {}) {
+        const request = {
+            playlistId: String(playlistId),
+            title,
+            source,
+            limit: options.limit ?? 40,
+            includeAll: Boolean(options.includeAll)
+        };
+        const payload = await requestJsonFromCSharp('getNeteaseExploreTracks', JSON.stringify(request), 60000);
+        return Array.isArray(payload.tracks) ? payload.tracks.map(normalizeTrack) : [];
+    }
+
+    async function openNeteaseChartInLibrary(playlistId, title) {
+        if (!playlistId || isLoadingExploreTracks) return;
+
+        isLoadingExploreTracks = true;
+        render();
+        try {
+            const chartTracks = await fetchNeteaseChartTracks(playlistId, title, 'chart', { includeAll: true });
+            if (chartTracks.length === 0) {
+                throw new Error('该网易云榜单暂无曲目。');
+            }
+
+            const chart = neteaseTopCharts.find(item => String(item.playlistId) === String(playlistId));
+            selectedPlaylist = {
+                id: `netease-chart-${playlistId}`,
+                externalId: String(playlistId),
+                isLocal: false,
+                isNetease: true,
+                isExploreChart: true,
+                name: title || chart?.name || '网易云热榜',
+                tracks: chart?.trackCount || chartTracks.length,
+                duration: '网易云榜单',
+                cover: chart?.coverUrl || getTrackCover(chartTracks[0]),
+                path: ''
+            };
+            neteaseTracks = chartTracks;
+            currentView = 'library';
+        } catch (error) {
+            alert(error instanceof Error ? error.message : '网易云榜单加载失败。');
+        } finally {
+            isLoadingExploreTracks = false;
+            render();
+            if (currentView === 'library') scrollLibraryTrackListIntoView('auto');
+        }
+    }
+
+    async function playNeteaseMood(tag) {
+        if (!tag || isLoadingExploreTracks) return;
+
+        currentView = 'ai-recommend';
+        isLoadingExploreTracks = true;
+        aiState = { isLoading: true, error: null };
+        messages.push({
+            id: Date.now().toString(),
+            type: 'user',
+            content: `推荐一些网易云「${tag}」氛围的音乐`,
+            timestamp: new Date()
+        });
+        render();
+        scrollChatToBottom();
+
+        try {
+            const payload = await requestJsonFromCSharp('getNeteaseMoodTracks', JSON.stringify({ tag, limit: 40 }), 60000);
+            const moodTracks = Array.isArray(payload.tracks) ? payload.tracks.map(normalizeTrack) : [];
+            if (moodTracks.length === 0) {
+                throw new Error(payload.message || '该心情氛围暂无可播放曲目。');
+            }
+
+            const playlistTitle = payload.playlistName
+                ? `AI推荐：${tag} · ${payload.playlistName}`
+                : `AI推荐：${tag}`;
+            setAIRecommendations(moodTracks, playlistTitle);
+            const playback = await playTrackCollectionConfirmed(aiRecommendedTracks, 0);
+            selectAIRecommendationPlaylist();
+            setLastAssistantPlaybackContext(playback.track, `根据网易云「${tag}」氛围推荐`, tag);
+            render();
+            scrollChatToBottom();
+
+            const prompt = buildRecommendationPlaylistPrompt(
+                `请用简短中文为网易云「${tag}」氛围生成一组 AI 推荐歌单。`,
+                aiRecommendedTracks,
+                listeningInsights,
+                { moodTag: tag }
+            );
+            const reason = await buildRecommendationPlaylistReason(
+                prompt,
+                aiRecommendedTracks,
+                listeningInsights,
+                `已从网易云「${tag}」氛围中选择歌曲`,
+                { moodTag: tag }
+            );
+            messages.push({
+                id: (Date.now() + 1).toString(),
+                type: 'ai',
+                content: reason,
+                timestamp: new Date()
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '网易云心情氛围加载失败。';
+            aiState.error = message;
+            messages.push({
+                id: (Date.now() + 1).toString(),
+                type: 'ai',
+                content: message,
+                timestamp: new Date()
+            });
+        } finally {
+            isLoadingExploreTracks = false;
+            aiState.isLoading = false;
+            render();
+            scrollChatToBottom();
+        }
+    }
+
+    function getPlayableLocalTracks() {
+        return tracks.filter(track => (track.filePath || track.sourceUri) && !track.isNetease);
+    }
+
+    function getInsightTopTracks() {
+        const topTracks = listeningInsights?.topTracks ?? listeningInsights?.TopTracks ?? [];
+        return Array.isArray(topTracks) ? topTracks : [];
+    }
+
+    function buildInsightNeteaseCandidates() {
+        return getInsightTopTracks()
+            .map(item => {
+                const songId = item.songId ?? item.SongId;
+                if (!songId || Number(songId) <= 0) return null;
+                return normalizeTrack({
+                    id: `netease-${songId}`,
+                    songId,
+                    isNetease: true,
+                    title: item.title ?? item.Title ?? `网易云歌曲 ${songId}`,
+                    artist: item.artist ?? item.Artist ?? '网易云历史记录',
+                    album: 'Music Library 听歌数据',
+                    sourceUri: `netease:${songId}`,
+                    coverUrl: ''
+                });
+            })
+            .filter(Boolean);
+    }
+
+    function rankLocalTracksByInsights(localTracks) {
+        const topPaths = getInsightTopTracks().map(item => item.trackPath ?? item.TrackPath ?? '');
+        return localTracks
+            .map((track, index) => {
+                const source = track.filePath || track.sourceUri || '';
+                const insightIndex = topPaths.findIndex(path => normalizePathForCompare(path) === normalizePathForCompare(source));
+                const score = insightIndex >= 0 ? 100 - insightIndex * 8 : Math.max(0, 20 - index);
+                return { track, score };
+            })
+            .sort((a, b) => b.score - a.score)
+            .map(item => item.track);
+    }
+
+    async function fetchStarterNeteaseTracks() {
+        const insightCandidates = buildInsightNeteaseCandidates();
+        let chartCandidates = [];
+        try {
+            await ensureNeteaseCharts();
+            const chart = chooseStarterChart();
+            if (chart) {
+                chartCandidates = await fetchNeteaseChartTracks(chart.playlistId, chart.name, 'startListening');
+            }
+        } catch (error) {
+            console.warn('Starter NetEase tracks unavailable:', error);
+        }
+
+        return uniqueTracks([...chartCandidates, ...insightCandidates]);
+    }
+
+    function chooseStartListeningTracks(localTracks, neteaseTracks) {
+        const rankedLocalTracks = rankLocalTracksByInsights(localTracks);
+        if (rankedLocalTracks.length > 0) {
+            return uniqueTracks([
+                rankedLocalTracks[0],
+                ...neteaseTracks.slice(0, 3),
+                ...rankedLocalTracks.slice(1, 3)
+            ]).slice(0, 5);
+        }
+
+        return uniqueTracks(neteaseTracks).slice(0, 5);
+    }
+
+    function getPreferredPlatformText(insights) {
+        const value = insights?.preferredPlatform ?? insights?.PreferredPlatform ?? '';
+        return value ? formatPlatformName(value) : '';
+    }
+
+    function getPreferredTimeText(insights) {
+        return insights?.preferredTimeBucket ?? insights?.PreferredTimeBucket ?? '';
+    }
+
+    function buildInsightSummary(insights, localCount, neteaseCount) {
+        const parts = [];
+        const platform = getPreferredPlatformText(insights);
+        const timeBucket = getPreferredTimeText(insights);
+        const totalHours = Number(insights?.totalHours ?? insights?.TotalHours ?? 0);
+
+        if (platform) parts.push(`最近 7 天更常听 ${platform}`);
+        if (timeBucket) parts.push(`常见听歌时段是 ${timeBucket}`);
+        if (totalHours > 0) parts.push(`本周已记录 ${totalHours.toFixed(1)} 小时听歌`);
+        if (localCount > 0) parts.push(`本地曲库有 ${localCount} 首可播放歌曲`);
+        if (neteaseCount > 0) parts.push(`网易云补充了 ${neteaseCount} 首候选歌曲`);
+
+        return parts.length > 0 ? parts.join('；') : '当前听歌数据还不多，因此优先选择可立即播放且风格稳定的歌曲';
+    }
+
+    function getTrackTitle(track) {
+        return track?.title || 'Unknown Track';
+    }
+
+    function getTrackArtist(track) {
+        return track?.artist || 'Unknown Artist';
+    }
+
+    function formatRecommendedTrack(track) {
+        const title = getTrackTitle(track);
+        const artist = getTrackArtist(track);
+        return artist && artist !== 'Unknown Artist'
+            ? `《${title}》 - ${artist}`
+            : `《${title}》`;
+    }
+
+    function formatTrackForPrompt(track, index = 0) {
+        const album = track?.album && track.album !== '网易云音乐' && track.album !== 'Local Music'
+            ? ` / ${track.album}`
+            : '';
+        return `${index + 1}. ${getTrackTitle(track)} - ${getTrackArtist(track)}${album} (${track?.isNetease ? '网易云' : 'Local'})`;
+    }
+
+    function normalizeRecommendationText(value) {
+        return String(value || '')
+            .toLowerCase()
+            .replace(/[《》「」"'\s\-–—_:：/\\()（）[\]【】]/g, '');
+    }
+
+    function recommendationMentionsTrack(text, track) {
+        const normalizedText = normalizeRecommendationText(text);
+        const rawTitle = String(track?.title || '');
+        const titleWithoutMix = rawTitle.replace(/\s*[\(（【\[].*?[\)）】\]]/g, '').trim();
+        const titleNeedles = [rawTitle, titleWithoutMix]
+            .map(normalizeRecommendationText)
+            .filter(value => value && value !== normalizeRecommendationText('Unknown Track'));
+        const needles = titleNeedles.length > 0
+            ? titleNeedles
+            : [track?.artist]
+                .map(normalizeRecommendationText)
+                .filter(value => value && value !== normalizeRecommendationText('Unknown Artist'));
+
+        return needles.some(value => Array.from(value).length >= 2 && normalizedText.includes(value));
+    }
+
+    function buildRecommendationIntro(first, fallbackIntro) {
+        const intro = String(fallbackIntro || '').trim().replace(/[。.!！?？]+$/, '');
+        return intro
+            ? `${intro}，先播放 ${formatRecommendedTrack(first)}。`
+            : `我先为你播放 ${formatRecommendedTrack(first)}。`;
+    }
+
+    function buildRuleBasedRecommendationText(recommendedTracks, insights, fallbackIntro, options = {}) {
+        const first = recommendedTracks[0];
+        const insightText = buildInsightSummary(insights, getPlayableLocalTracks().length, recommendedTracks.filter(track => track.isNetease).length);
+        if (!first) return fallbackIntro || '暂时没有可播放的推荐曲目。';
+
+        const sourceText = first.isNetease ? '网易云推荐池' : 'Music Library';
+        const moodText = options.moodTag ? `「${options.moodTag}」氛围` : '当前推荐场景';
+        const albumText = first.album && first.album !== '网易云音乐' && first.album !== 'Local Music'
+            ? `，专辑/歌单线索是「${first.album}」`
+            : '';
+        const queueHint = recommendedTracks.length > 1
+            ? `后续队列还准备了 ${recommendedTracks.slice(1, 3).map(formatRecommendedTrack).join('、')}，会继续保持相近的听感。`
+            : '我会先把这首作为本次推荐的开场。';
+
+        return [
+            buildRecommendationIntro(first, fallbackIntro),
+            `推荐理由：这首歌来自${sourceText}${albumText}，和${moodText}匹配；${insightText}。`,
+            queueHint
+        ].join('\n');
+    }
+
+    function buildSingleTrackRecommendationReason(track, index, insights, options = {}) {
+        const sourceText = track.isNetease ? '网易云推荐池' : 'Music Library';
+        const moodText = options.moodTag ? `「${options.moodTag}」氛围` : '这次推荐';
+        const albumText = track.album && track.album !== '网易云音乐' && track.album !== 'Local Music'
+            ? `，专辑/歌单线索是「${track.album}」`
+            : '';
+        const roleHints = [
+            '适合作为开场，把情绪先稳稳带起来',
+            '能延续前一首的听感，又给歌单增加一点变化',
+            '放在中段可以让节奏和情绪更有层次',
+            '适合把注意力重新拉回旋律与声线',
+            '作为收束会让这组推荐保持完整的余味'
+        ];
+        const insightText = buildInsightSummary(insights, getPlayableLocalTracks().length, track.isNetease ? 1 : 0);
+
+        return `来自${sourceText}${albumText}，贴合${moodText}；${roleHints[index] || roleHints[0]}，也参考了${insightText}。`;
+    }
+
+    function buildRuleBasedRecommendationPlaylistText(recommendedTracks, insights, fallbackIntro, options = {}) {
+        const playlistTracks = recommendedTracks.slice(0, 5);
+        if (playlistTracks.length === 0) return fallbackIntro || '暂时没有可播放的推荐曲目。';
+
+        const intro = String(fallbackIntro || '').trim().replace(/[。.!！?？]+$/, '');
+        const header = intro
+            ? `${intro}，我先给你这 5 首歌：`
+            : '我先给你这 5 首歌：';
+        const items = playlistTracks.map((track, index) =>
+            `${index + 1}. ${formatRecommendedTrack(track)}：${buildSingleTrackRecommendationReason(track, index, insights, options)}`
+        );
+
+        return [header, ...items].join('\n');
+    }
+
+    function recommendationMentionsAllTracks(text, recommendedTracks) {
+        const tracksToCheck = recommendedTracks
+            .slice(0, 5)
+            .filter(track => isMeaningfulTrackTitle(track.title) || isMeaningfulArtist(track.artist));
+        if (tracksToCheck.length === 0) return true;
+
+        return tracksToCheck.every(track => recommendationMentionsTrack(text, track));
+    }
+
+    function ensurePlaylistReasonCoversTracks(reason, recommendedTracks, insights, fallbackIntro, options = {}) {
+        if (reason && recommendationMentionsAllTracks(reason, recommendedTracks)) {
+            return reason.trim();
+        }
+
+        return buildRuleBasedRecommendationPlaylistText(recommendedTracks, insights, fallbackIntro, options);
+    }
+
+    function buildRecommendationPlaylistPrompt(baseInstruction, recommendedTracks, insights, options = {}) {
+        const playlistTracks = uniqueTracks(recommendedTracks).slice(0, 5);
+        const trackList = playlistTracks
+            .map(formatTrackForPrompt)
+            .join('\n');
+        const insightText = buildInsightSummary(insights, getPlayableLocalTracks().length, playlistTracks.filter(track => track.isNetease).length);
+        const moodText = options.moodTag ? `\n用户选择的心情标签：${options.moodTag}` : '';
+
+        return `${baseInstruction}${moodText}\n\n听歌洞察：${insightText}\n\n候选歌曲只能使用下面这 5 首：\n${trackList}\n\n硬性要求：先回复这 5 首歌的歌单；按 1-5 编号逐首写“歌名 - 歌手：推荐理由”；每一首都必须有单独理由；不要只解释第一首；不要推荐、列举或编造候选列表之外的歌名。`;
+    }
+
+    async function buildRecommendationPlaylistReason(prompt, recommendedTracks, insights, fallbackIntro, options = {}) {
+        if (aiConfig.apiKey && aiConfig.apiKey.trim()) {
+            try {
+                const reason = await requestAIMessage(prompt);
+                return ensurePlaylistReasonCoversTracks(reason, recommendedTracks, insights, fallbackIntro, options);
+            } catch (error) {
+                aiState.error = error instanceof Error ? error.message : 'AI service is unavailable.';
+            }
+        }
+
+        return buildRuleBasedRecommendationPlaylistText(recommendedTracks, insights, fallbackIntro, options);
+    }
+
+    function ensureReasonTargetsNowPlaying(reason, recommendedTracks, insights, fallbackIntro, options = {}) {
+        const actual = getNowPlayingSnapshot().track || recommendedTracks[0];
+        if (!actual) return reason || buildRuleBasedRecommendationText(recommendedTracks, insights, fallbackIntro, options);
+        if (recommendationMentionsTrack(reason, actual)) return reason.trim();
+
+        const actualFirst = uniqueTracks([
+            actual,
+            ...recommendedTracks.filter(track => normalizePathForCompare(getTrackSource(track)) !== normalizePathForCompare(getTrackSource(actual)))
+        ]);
+        return buildRuleBasedRecommendationText(actualFirst, insights, fallbackIntro, options);
+    }
+
+    function buildRecommendationPrompt(baseInstruction, recommendedTracks, insights, options = {}) {
+        const actual = getNowPlayingSnapshot().track || recommendedTracks[0];
+        const promptTracks = uniqueTracks([
+            ...(actual ? [actual] : []),
+            ...recommendedTracks
+        ]);
+        const trackList = promptTracks
+            .slice(0, 5)
+            .map(formatTrackForPrompt)
+            .join('\n');
+        const insightText = buildInsightSummary(insights, getPlayableLocalTracks().length, recommendedTracks.filter(track => track.isNetease).length);
+        const moodText = options.moodTag ? `\n用户选择的心情标签：${options.moodTag}` : '';
+        const nowPlayingText = actual ? `\n播放器当前实际状态：${formatTrackForPrompt(actual)}` : '\n播放器当前没有歌曲。';
+
+        return `${baseInstruction}${moodText}${nowPlayingText}\n\n听歌洞察：${insightText}\n\n候选歌曲只能使用下面这 5 首：\n${trackList}\n\n硬性要求：只围绕“播放器当前实际状态”的第一首写 2-4 句中文推荐理由；必须点名这首歌和歌手；不要推荐、列举或编造候选列表之外的歌名。`;
+    }
+
+    async function buildRecommendationReason(prompt, recommendedTracks, insights, fallbackIntro, options = {}) {
+        if (aiConfig.apiKey && aiConfig.apiKey.trim()) {
+            try {
+                const reason = await requestAIMessage(prompt);
+                return ensureReasonTargetsNowPlaying(reason, recommendedTracks, insights, fallbackIntro, options);
+            } catch (error) {
+                aiState.error = error instanceof Error ? error.message : 'AI service is unavailable.';
+            }
+        }
+
+        return buildRuleBasedRecommendationText(recommendedTracks, insights, fallbackIntro, options);
+    }
+
+    async function startListening() {
+        if (startListeningState.isLoading) return;
+
+        startListeningState = { isLoading: true, error: '' };
+        aiState = { isLoading: true, error: null };
+        currentView = 'ai-recommend';
+        messages.push({
+            id: Date.now().toString(),
+            type: 'user',
+            content: 'Start listening based on my Music Library data',
+            timestamp: new Date()
+        });
+        render();
+        scrollChatToBottom();
+
+        try {
+            try {
+                const insightsPayload = await requestJsonFromCSharp('getListeningInsights', '', 20000);
+                listeningInsights = insightsPayload;
+            } catch (error) {
+                console.warn('Listening insights unavailable:', error);
+            }
+
+            const localCandidates = rankLocalTracksByInsights(getPlayableLocalTracks());
+            const neteaseCandidates = await fetchStarterNeteaseTracks();
+            const recommendedTracks = chooseStartListeningTracks(localCandidates, neteaseCandidates);
+            if (recommendedTracks.length === 0) {
+                throw new Error('没有找到可播放的本地歌曲或网易云推荐歌曲，请先扫描曲库或启动 NeteaseCloudMusicApi。');
+            }
+
+            aiRecommendedTracks = recommendedTracks;
+            const playback = await playTrackCollectionConfirmed(recommendedTracks, 0, { detachPlaylist: true });
+            setLastAssistantPlaybackContext(playback.track, '根据 Music Library 听歌数据和网易云候选生成推荐', 'Start Listening');
+            render();
+            scrollChatToBottom();
+
+            const prompt = buildRecommendationPrompt(
+                '请根据 MusicAgent 的 Music Library 听歌数据和网易云候选歌曲，生成本次 Start Listening 的推荐理由。',
+                recommendedTracks,
+                listeningInsights
+            );
+            const reason = await buildRecommendationReason(prompt, recommendedTracks, listeningInsights, '我根据 Music Library 听歌数据生成了这次推荐。');
+            messages.push({
+                id: (Date.now() + 1).toString(),
+                type: 'ai',
+                content: reason,
+                timestamp: new Date()
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Start Listening failed.';
+            startListeningState = { isLoading: false, error: message };
+            aiState.error = message;
+            messages.push({
+                id: (Date.now() + 1).toString(),
+                type: 'ai',
+                content: message,
+                timestamp: new Date()
+            });
+        } finally {
+            startListeningState.isLoading = false;
+            aiState.isLoading = false;
+            render();
+            scrollChatToBottom();
+        }
+    }
+
+    function setLastAssistantPlaybackContext(track, reason, query = '') {
+        if (!track) return;
+        lastAssistantPlaybackContext = {
+            sourceUri: getTrackSource(track),
+            title: track.title || '',
+            artist: track.artist || '',
+            reason,
+            query,
+            createdAt: Date.now()
+        };
+    }
+
+    function matchesCurrentContext(track) {
+        if (!track || !lastAssistantPlaybackContext) return false;
+        const currentSource = normalizePathForCompare(getTrackSource(track));
+        const contextSource = normalizePathForCompare(lastAssistantPlaybackContext.sourceUri);
+        if (currentSource && contextSource && currentSource === contextSource) return true;
+
+        const currentTitle = normalizeRecommendationText(track.title);
+        const contextTitle = normalizeRecommendationText(lastAssistantPlaybackContext.title);
+        return Boolean(currentTitle && contextTitle && currentTitle === contextTitle);
+    }
+
+    function buildCurrentTrackReason(track) {
+        const sourceText = track.isNetease ? '来自 NeteaseCloudMusicApi 的网易云曲库' : '来自本地 Music Library';
+        const insightText = buildInsightSummary(listeningInsights, getPlayableLocalTracks().length, aiRecommendedTracks.filter(item => item.isNetease).length);
+        const contextText = matchesCurrentContext(track) && lastAssistantPlaybackContext.reason
+            ? lastAssistantPlaybackContext.reason
+            : `播放器当前状态显示这首歌是实际载入的音源，来源是${sourceText}`;
+        return `${contextText}；${insightText}。`;
+    }
+
+    function buildNowPlayingResponse() {
+        const snapshot = getNowPlayingSnapshot();
+        if (!snapshot.hasTrack || !snapshot.track) {
+            return '我现在没有检测到播放器里有正在播放的歌曲。你可以直接说“帮我播放 One Last Kiss”，我会先去网易云搜索并播放。';
+        }
+
+        const statusText = snapshot.isPlaying ? '正在播放' : '当前暂停在';
+        return `${statusText}：${formatRecommendedTrack(snapshot.track)}。\n理由：${buildCurrentTrackReason(snapshot.track)}`;
+    }
+
+    function isNowPlayingQuestion(content) {
+        const text = String(content || '').trim().toLowerCase();
+        return /(?:现在|当前|正在).*(?:播放|放|听).*(?:什么|哪首|哪一首|歌名|歌曲)/.test(text) ||
+            /(?:播放|放|听).*(?:什么|哪首|哪一首)/.test(text) ||
+            /now playing|what(?:'s| is)? playing|what song/i.test(text);
+    }
+
+    function isCurrentSongReasonQuestion(content) {
+        const text = String(content || '').trim().toLowerCase();
+        return /(为什么|原因|理由|推荐理由|适合|why)/.test(text) &&
+            /(这首|当前|现在|正在|播放|推荐|song|track)/i.test(text);
+    }
+
+    function isRecommendationRequest(content) {
+        return /(推荐|心情|氛围|适合|来点|来首|歌单|音乐|听什么|recommend|music|mood)/i.test(String(content || ''));
+    }
+
+    function clampVolume(value) {
+        return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+    }
+
+    function parseVolumeTarget(content) {
+        const text = String(content || '').toLowerCase();
+        if (!/(音量|声音|声量|volume|vol|静音|mute)/.test(text)) return null;
+        if (/取消静音|解除静音|unmute/.test(text)) return Math.max(volume || 70, 30);
+        if (/静音|mute/.test(text)) return 0;
+
+        const numeric = text.match(/(\d{1,3})\s*(?:%|％)?/);
+        if (numeric && /(到|为|成|设|设置|调至|调到|音量|volume|vol)/.test(text)) {
+            return clampVolume(numeric[1]);
+        }
+
+        const deltaMatch = text.match(/(?:加|增加|提高|调大|升高|raise|up|louder|减|减少|降低|调小|down|quieter)\D*(\d{1,3})/);
+        const delta = deltaMatch ? Number(deltaMatch[1]) : 10;
+        if (/(加|增加|提高|调大|升高|raise|up|louder|大一点|高一点)/.test(text)) {
+            return clampVolume(volume + delta);
+        }
+        if (/(减|减少|降低|调小|down|quieter|小一点|低一点)/.test(text)) {
+            return clampVolume(volume - delta);
+        }
+
+        return null;
+    }
+
+    function parsePlaybackMode(content) {
+        const text = String(content || '').toLowerCase();
+        if (/(随机|shuffle)/.test(text)) return 'shuffle';
+        if (/(单曲循环|循环|repeat)/.test(text)) return 'repeat';
+        if (/(顺序|列表播放|normal)/.test(text)) return 'normal';
+        return null;
+    }
+
+    async function setVolumeConfirmed(nextVolume) {
+        const target = clampVolume(nextVolume);
+        await requestJsonFromCSharp('setVolume', target.toString(), 10000);
+        volume = target;
+        renderPlayer();
+        return `音量已调到 ${target}%。`;
+    }
+
+    async function executeSimplePlaybackAction(action, label) {
+        await requestJsonFromCSharp(action, '', 60000);
+        const snapshot = getNowPlayingSnapshot();
+        if (action === 'stop') {
+            return '已停止播放。';
+        }
+        if (snapshot.hasTrack && snapshot.track) {
+            return `${label}：${formatRecommendedTrack(snapshot.track)}。`;
+        }
+        return `${label}。`;
+    }
+
+    async function tryExecutePlaybackControl(content) {
+        const text = String(content || '').trim().toLowerCase();
+        const nextVolume = parseVolumeTarget(text);
+        if (nextVolume !== null) {
+            return await setVolumeConfirmed(nextVolume);
+        }
+
+        if (/(下一首|下首|切歌|next)/.test(text)) {
+            return await executeSimplePlaybackAction('next', '已切到下一首');
+        }
+        if (/(上一首|上首|previous|prev)/.test(text)) {
+            return await executeSimplePlaybackAction('previous', '已切到上一首');
+        }
+        if (/(暂停|pause)/.test(text)) {
+            return await executeSimplePlaybackAction('pause', '已暂停');
+        }
+        if (/(停止|stop)/.test(text)) {
+            return await executeSimplePlaybackAction('stop', '已停止播放');
+        }
+        if (/^(继续播放|恢复播放|继续|恢复|resume|play)$/i.test(text)) {
+            if (!getNowPlayingSnapshot().hasTrack && getPlayableQueue().length > 0) {
+                const playback = await playTrackCollectionConfirmed(getActiveTrackList(), 0);
+                setLastAssistantPlaybackContext(playback.track, '根据当前列表继续播放', '');
+                return `已开始播放：${formatRecommendedTrack(playback.track)}。`;
+            }
+            return await executeSimplePlaybackAction('resume', '已继续播放');
+        }
+
+        const mode = parsePlaybackMode(text);
+        if (mode) {
+            playbackStrategy = mode;
+            await requestJsonFromCSharp('setPlaybackStrategy', JSON.stringify({ strategy: mode }), 10000);
+            renderPlayer();
+            return `播放模式已切换为${getPlaybackStrategyLabel()}。`;
+        }
+
+        return null;
+    }
+
+    function normalizeSearchText(value) {
+        return String(value || '')
+            .toLowerCase()
+            .replace(/[《》「」"'\s\-–—_:：/\\()（）\[\]【】.,，。!?！？]/g, '');
+    }
+
+    function scoreTrackMatch(query, track) {
+        const queryText = normalizeSearchText(query);
+        const titleText = normalizeSearchText(track.title);
+        const artistText = normalizeSearchText(track.artist);
+        const combined = normalizeSearchText(`${track.title}${track.artist}${track.album || ''}`);
+        if (!queryText) return 0;
+        if (titleText === queryText) return 120;
+        if (combined === queryText) return 110;
+        if (titleText.includes(queryText)) return 95;
+        if (queryText.includes(titleText) && titleText.length >= 2) return 85;
+        if (combined.includes(queryText)) return 70;
+        if (artistText && queryText.includes(artistText)) return 20;
+        return 0;
+    }
+
+    function chooseBestTrackMatch(query, candidates) {
+        return [...candidates]
+            .map((track, index) => ({ track, index, score: scoreTrackMatch(query, track) }))
+            .sort((a, b) => b.score - a.score || a.index - b.index)
+            .map(item => item.track)[0] || null;
+    }
+
+    function searchLocalTracks(query, limit = 5) {
+        return tracks
+            .filter(track => track.filePath || track.sourceUri)
+            .map(track => ({ track: normalizeTrack(track), score: scoreTrackMatch(query, track) }))
+            .filter(item => item.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit)
+            .map(item => item.track);
+    }
+
+    async function searchNeteaseTracks(query, limit = 8) {
+        const payload = await requestJsonFromCSharp('searchNeteaseSongs', JSON.stringify({ keywords: query, limit }), 60000);
+        return Array.isArray(payload.tracks) ? payload.tracks.map(normalizeTrack) : [];
+    }
+
+    function extractPlayQuery(content) {
+        const raw = String(content || '').trim();
+        const normalized = raw.toLowerCase();
+        if (/^(播放|放|听|play)$/.test(normalized)) return '';
+        if (/(下一首|上一首|暂停|继续|恢复|音量|静音|随机|循环|顺序|next|previous|pause|resume|volume|mute)/i.test(raw)) return '';
+
+        const patterns = [
+            /^(?:帮我|请|给我|麻烦)?\s*(?:播放|放一下|放|来一首|来首|我想听|想听|听)\s*(?:一首|一下|下)?\s*[《「"']?(.+?)[》」"']?\s*(?:吧|谢谢)?$/i,
+            /^(?:please\s+)?(?:play|put on)\s+(.+?)\s*$/i
+        ];
+
+        for (const pattern of patterns) {
+            const match = raw.match(pattern);
+            if (!match) continue;
+            return match[1]
+                .replace(/^(歌曲|歌|音乐)\s*/i, '')
+                .replace(/\s*(这首歌|这首|一下|吧|谢谢|please)$/i, '')
+                .trim();
+        }
+
+        return '';
+    }
+
+    function buildPlaybackStartedResponse(track, query, queue) {
+        const sourceText = track.isNetease ? 'NeteaseCloudMusicApi/网易云' : '本地曲库';
+        const alternatives = queue
+            .slice(1, 3)
+            .map(formatRecommendedTrack)
+            .join('、');
+        const queueText = alternatives ? `后续队列里我还放了 ${alternatives}。` : '这次先只播放这一首。';
+        return [
+            `正在通过${sourceText}为你播放：${formatRecommendedTrack(track)}。`,
+            `理由：我用“${query}”匹配歌名、歌手和专辑信息，优先选择了与点歌最接近、并且能交给播放器解析的音源。${queueText}`
+        ].join('\n');
+    }
+
+    async function playRequestedSong(query) {
+        const cleanQuery = String(query || '').trim();
+        if (!cleanQuery) {
+            return '你想听哪首歌？可以直接说“帮我播放 One Last Kiss”。';
+        }
+
+        let neteaseMatches = [];
+        let neteaseError = null;
+        try {
+            neteaseMatches = await searchNeteaseTracks(cleanQuery, 8);
+        } catch (error) {
+            neteaseError = error;
+            console.warn('NetEase search failed:', error);
+        }
+
+        const localMatches = searchLocalTracks(cleanQuery, 5);
+        const candidates = uniqueTracks([...neteaseMatches, ...localMatches]);
+        if (candidates.length === 0) {
+            if (neteaseError) {
+                throw new Error(`网易云搜索失败：${neteaseError.message || neteaseError}。请确认 NeteaseCloudMusicApi 正在运行，并在 Settings 中检查 API 地址。`);
+            }
+            throw new Error(`没有找到“${cleanQuery}”的可播放歌曲。`);
+        }
+
+        const selected = chooseBestTrackMatch(cleanQuery, candidates) || candidates[0];
+        const queue = uniqueTracks([
+            selected,
+            ...candidates.filter(track => normalizePathForCompare(getTrackSource(track)) !== normalizePathForCompare(getTrackSource(selected)))
+        ]).slice(0, 5);
+        aiRecommendedTracks = queue;
+
+        const playback = await playTrackCollectionConfirmed(queue, 0, { detachPlaylist: true });
+        const actualTrack = getNowPlayingSnapshot().track || playback.track || selected;
+        setLastAssistantPlaybackContext(actualTrack, `根据你的点歌“${cleanQuery}”从${actualTrack.isNetease ? '网易云' : '本地曲库'}匹配`, cleanQuery);
+        return buildPlaybackStartedResponse(actualTrack, cleanQuery, queue);
+    }
+
+    async function executeAIMusicCommand(content) {
+        if (isNowPlayingQuestion(content) || isCurrentSongReasonQuestion(content)) {
+            return buildNowPlayingResponse();
+        }
+
+        const controlResponse = await tryExecutePlaybackControl(content);
+        if (controlResponse) {
+            return controlResponse;
+        }
+
+        const playQuery = extractPlayQuery(content);
+        if (playQuery) {
+            return await playRequestedSong(playQuery);
+        }
+
+        return null;
     }
 
     function cyclePlaybackStrategy() {
@@ -1474,6 +2672,9 @@
             </div>
         `;
         attachEventListeners();
+        if (currentView === 'library' && shouldScrollLibraryTrackList) {
+            scrollLibraryTrackListIntoView('auto');
+        }
         if (currentView === 'ai-recommend') {
             requestAnimationFrame(() => {
                 updateLyricsPadding();
@@ -1573,18 +2774,6 @@
                             </button>
                         </div>
                     </div>
-                    <div class="h-64 card flex items-center gap-6">
-                        <div class="w-44 h-44 rounded-xl overflow-hidden shadow-2xl">
-                            <img src="https://images.unsplash.com/photo-1511379938547-c1f69419868d?w=400&h=400&fit=crop" alt="Midnight Jazz" class="w-full h-full object-cover">
-                        </div>
-                        <div class="flex-1">
-                            <h3 class="text-2xl font-bold mb-2">${escapeHtml(aiRecommendedTracks[0]?.title || 'AI Local Picks')}</h3>
-                            <p class="text-gray-400 mb-4">${escapeHtml(aiRecommendedTracks[0]?.artist || 'Ask for a mood to generate recommendations')}</p>
-                            <div class="flex gap-2 text-sm text-gray-500">
-                                <span></span><span>•</span><span>tracks</span><span>•</span><span></span>
-                            </div>
-                        </div>
-                    </div>
                 </div>
                 <div class="w-96 card flex flex-col min-h-0 overflow-hidden">
                     <h3 class="text-lg font-semibold mb-4 flex-shrink-0">Lyrics</h3>
@@ -1598,57 +2787,78 @@
     }
 
     function renderExplore() {
-        const moods = [
-            { name: 'Focus', gradient: 'from-blue-500 to-cyan-500' },
-            { name: 'Rainy Day', gradient: 'from-gray-500 to-blue-500' },
-            { name: 'Jazz Night', gradient: 'from-indigo-500 to-purple-500' },
-            { name: 'Morning Coffee', gradient: 'from-amber-500 to-orange-500' },
-            { name: 'Chill Vibes', gradient: 'from-pink-500 to-rose-500' },
-            { name: 'Energize', gradient: 'from-yellow-500 to-orange-500' }
-        ];
-        const charts = [
-            { platform: 'Spotify', color: 'from-orange-500 to-amber-500', tracks: ['Blinding Lights', 'Save Your Tears', 'Levitating'] },
-            { platform: 'NetEase Cloud', color: 'from-red-500 to-rose-600', tracks: ['Sunny Day', 'Qilixiang', 'Rice Aroma'] },
-            { platform: 'Apple Music', color: 'from-yellow-400 to-amber-500', tracks: ['As It Was', 'Anti-Hero', 'Flowers'] },
-            { platform: 'QQ Music', color: 'from-emerald-500 to-teal-500', tracks: ['Young and Promising', 'Wind Rises', 'Light Years Away'] }
-        ];
+        const moodGradients = ['from-rose-500 to-red-600', 'from-indigo-500 to-sky-600', 'from-emerald-500 to-teal-600', 'from-violet-500 to-fuchsia-600', 'from-amber-500 to-orange-600', 'from-cyan-500 to-blue-600', 'from-pink-500 to-rose-600', 'from-slate-500 to-purple-600'];
+        const chartCards = neteaseTopCharts.length > 0
+            ? neteaseTopCharts.map((chart, index) => {
+                const previewTracks = chart.tracks;
+                return `
+                    <button class="card hover:border-red-500/40 transition-all text-left group overflow-hidden" data-netease-chart-id="${escapeHtml(chart.playlistId)}" data-chart-title="${escapeHtml(chart.name)}">
+                        <div class="flex items-start gap-4 mb-4">
+                            <div class="w-16 h-16 rounded-lg overflow-hidden bg-white/10 flex-shrink-0">
+                                ${chart.coverUrl ? `<img src="${escapeHtml(chart.coverUrl)}" alt="${escapeHtml(chart.name)}" class="w-full h-full object-cover" loading="lazy" onerror="this.style.display='none'">` : `<div class="w-full h-full bg-gradient-to-br from-red-500 to-rose-700 flex items-center justify-center text-lg font-bold">#${index + 1}</div>`}
+                            </div>
+                            <div class="min-w-0">
+                                <div class="text-xs text-red-300 mb-1">${escapeHtml(chart.updateFrequency || '网易云官方榜')}</div>
+                                <h4 class="font-semibold truncate">${escapeHtml(chart.name)}</h4>
+                                <p class="text-xs text-gray-500 mt-1">${chart.trackCount ? `${chart.trackCount} 首` : '实时榜单'}</p>
+                            </div>
+                        </div>
+                        <div class="space-y-2">
+                            ${previewTracks.length > 0
+                                ? previewTracks.slice(0, 3).map((track, idx) => `<div class="text-sm text-gray-400 truncate">${idx + 1}. ${escapeHtml(track.title)}${track.artist ? ` - ${escapeHtml(track.artist)}` : ''}</div>`).join('')
+                                : '<div class="text-sm text-gray-500">暂无曲目预览</div>'}
+                        </div>
+                    </button>
+                `;
+            }).join('')
+            : `
+                <div class="col-span-4 card text-center text-gray-400">
+                    <div class="text-lg font-medium text-white mb-2">${isLoadingNeteaseTopCharts ? '正在加载网易云热榜…' : '暂无网易云热榜数据'}</div>
+                    <div class="text-sm">${isLoadingNeteaseTopCharts ? '请确认 NeteaseCloudMusicApi 正在运行' : '在 Settings 中确认 API 地址后重试'}</div>
+                </div>
+            `;
+        const moodCards = neteaseMoodTags.length > 0
+            ? neteaseMoodTags.map((tag, index) => `
+                <button class="mood-card bg-gradient-to-br ${moodGradients[index % moodGradients.length]} text-left" data-mood-tag="${escapeHtml(tag.name)}">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-2v13M9 19c0 1.105-1.79 2-4 2s-4-.895-4-2 1.79-2 4-2 4 .895 4 2zm12-2c0 1.105-1.79 2-4 2s-4-.895-4-2 1.79-2 4-2 4 .895 4 2zM9 10l12-2"/></svg>
+                    <div>
+                        <h4 class="text-lg font-semibold">${escapeHtml(tag.name)}</h4>
+                        <p class="text-xs text-white/70 mt-1">${tag.hot ? '热门氛围' : '网易云歌单标签'}</p>
+                    </div>
+                </button>
+            `).join('')
+            : `
+                <div class="col-span-3 card text-center text-gray-400">
+                    <div class="text-lg font-medium text-white mb-2">${isLoadingNeteaseMoodTags ? '正在加载心情氛围…' : '暂无心情氛围数据'}</div>
+                    <div class="text-sm">${isLoadingNeteaseMoodTags ? '从网易云歌单分类获取场景与情感标签' : '请检查 NeteaseCloudMusicApi 服务'}</div>
+                </div>
+            `;
         return `
             <div class="space-y-8">
                 <div class="relative h-64 rounded-2xl overflow-hidden">
                     <img src="https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=1200&h=400&fit=crop" alt="AI Discovery" class="w-full h-full object-cover">
                     <div class="absolute inset-0 bg-gradient-to-r from-black/80 via-black/50 to-transparent flex items-center">
                         <div class="p-12">
-                            <h2 class="text-4xl font-bold mb-3">AI Discovery: Today Mood Radio</h2>
-                            <p class="text-lg text-gray-300 mb-6">Curated music for today based on your listening habits</p>
-                            <button class="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all font-medium">Start Listening</button>
+                            <h2 class="text-4xl font-bold mb-3">今日推荐</h2>
+                            <p class="text-lg text-gray-300 mb-6">结合 Music Library 听歌数据与网易云热榜生成推荐</p>
+                            <button id="start-listening-btn" class="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl hover:from-purple-600 hover:to-pink-700 transition-all font-medium disabled:opacity-60" ${startListeningState.isLoading ? 'disabled' : ''}>${startListeningState.isLoading ? 'Preparing…' : 'Start Listening'}</button>
+                            ${startListeningState.error ? `<div class="mt-3 text-sm text-red-200">${escapeHtml(startListeningState.error)}</div>` : ''}
                         </div>
                     </div>
                 </div>
                 <div>
-                    <h3 class="text-2xl font-bold mb-6">Top Charts</h3>
+                    <div class="flex items-center justify-between mb-6">
+                        <h3 class="text-2xl font-bold">NetEase Hot Charts</h3>
+                        ${isLoadingExploreTracks ? '<span class="text-sm text-red-300">加载曲目中…</span>' : ''}
+                    </div>
                     <div class="grid grid-cols-4 gap-4">
-                        ${charts.map(chart => `
-                            <div class="card hover:border-purple-500/30 transition-all cursor-pointer group">
-                                <div class="w-12 h-12 rounded-lg bg-gradient-to-br ${chart.color} mb-4 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                    <span class="text-2xl font-bold">#1</span>
-                                </div>
-                                <h4 class="font-semibold mb-3">${chart.platform}</h4>
-                                <div class="space-y-2">
-                                    ${chart.tracks.map((track, idx) => `<div class="text-sm text-gray-400 truncate">${idx + 1}. ${track}</div>`).join('')}
-                                </div>
-                            </div>
-                        `).join('')}
+                        ${chartCards}
                     </div>
                 </div>
                 <div>
-                    <h3 class="text-2xl font-bold mb-6">Browse by Mood</h3>
+                    <h3 class="text-2xl font-bold mb-6">心情氛围</h3>
                     <div class="grid grid-cols-3 gap-4">
-                        ${moods.map(mood => `
-                            <div class="mood-card bg-gradient-to-br ${mood.gradient}" data-mood="${mood.name}">
-                                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-                                <h4 class="text-lg font-semibold">${mood.name}</h4>
-                            </div>
-                        `).join('')}
+                        ${moodCards}
                     </div>
                 </div>
             </div>
@@ -1657,16 +2867,21 @@
 
     function renderLibrary() {
         const libraryPlaylists = getLibraryPlaylists();
-        const hasLocalLibraries = libraryPlaylists.length > 0;
+        const hasLocalLibraries = localPaths.length > 0;
         const hasNeteasePlaylists = neteasePlaylists.length > 0;
-        const trackListTitle = selectedPlaylist?.isNetease
+        const hasAnyPlaylists = libraryPlaylists.length > 0;
+        const trackListTitle = selectedPlaylist?.isAIRecommendation
+            ? selectedPlaylist.name
+            : (selectedPlaylist?.isNetease
             ? `${selectedPlaylist.name}（网易云）`
-            : (selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks');
-        const visibleTracks = selectedPlaylist?.isNetease
+            : (selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks'));
+        const visibleTracks = selectedPlaylist?.isAIRecommendation
+            ? aiRecommendedTracks
+            : (selectedPlaylist?.isNetease
             ? neteaseTracks
             : (selectedPlaylist?.isLocal
                 ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
-                : tracks);
+                : tracks));
         const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
             ? '姝ｅ湪璇诲彇宸叉湁姝屽崟姝屾洸...'
             : '鏆傛棤姝屾洸';
@@ -1690,16 +2905,23 @@
                         ` : ''}
                     </div>
                     <div class="grid grid-cols-5 gap-4">
-                        ${hasLocalLibraries || hasNeteasePlaylists ? libraryPlaylists.map(playlist => `
-                            <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" ${playlist.isNetease ? `data-netease-playlist-id="${playlist.externalId}"` : `data-local-playlist-index="${playlist.sourceIndex}"`}>
+                        ${hasAnyPlaylists ? libraryPlaylists.map(playlist => {
+                            const playlistAttrs = playlist.isAIRecommendation
+                                ? 'data-ai-recommendation-playlist="true"'
+                                : (playlist.isNetease ? `data-netease-playlist-id="${playlist.externalId}"` : `data-local-playlist-index="${playlist.sourceIndex}"`);
+                            const badge = playlist.isAIRecommendation
+                                ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-purple-500/80">AI</span>'
+                                : (playlist.isNetease ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">网易</span>' : '');
+                            return `
+                            <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" ${playlistAttrs}>
                                 <div class="aspect-square rounded-lg overflow-hidden mb-3 relative">
                                     <img src="${escapeHtml(playlist.cover || getDefaultCover())}" alt="${playlist.name || 'Playlist'}" class="w-full h-full object-cover" loading="lazy" onerror="this.onerror=null;this.src='${escapeHtml(getDefaultCover())}'">
-                                    ${playlist.isNetease ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">网易</span>' : ''}
+                                    ${badge}
                                 </div>
                                 <h4 class="font-medium text-sm truncate">${playlist.name || 'Untitled Playlist'}</h4>
                                 <p class="text-xs text-gray-400">${playlist.tracks ?? 0} 首 · ${playlist.duration || '--'}</p>
                             </div>
-                        `).join('') : `
+                        `}).join('') : `
                             <button class="col-span-5 p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" data-empty-manual-play="true">
                                 <div class="text-lg font-medium mb-2">鏆傛棤姝屾洸</div>
                                 <div class="text-sm text-gray-400">Click to manually enter an audio file path to play</div>
@@ -1707,7 +2929,7 @@
                         `}
                     </div>
                 </div>
-                <div class="card">
+                <div class="card" id="library-track-list">
                     <h3 class="text-xl font-semibold mb-6">${trackListTitle}${isLoadingNeteaseTracks ? ' <span class="text-sm text-gray-400 font-normal">加载中…</span>' : ''}</h3>
                     <div class="space-y-2">
                         ${visibleTracks.length > 0 ? visibleTracks.map((track, index) => `
@@ -1729,7 +2951,7 @@
                         `).join('') : `
                             <div class="w-full p-8 rounded-lg bg-white/5 border border-white/10 text-center text-gray-400">
                                 <div class="text-lg font-medium mb-2 text-white">${isLoadingNeteaseTracks ? '正在加载歌单曲目…' : (selectedPlaylist?.isNetease ? '请选择网易云歌单或先同步' : emptyTrackText)}</div>
-                                <div class="text-sm">${isLoadingNeteaseTracks ? '首次打开会从网易云拉取曲目' : (selectedPlaylist?.isNetease ? '打开歌单后将自动播放第一首' : emptyTrackHint)}</div>
+                                <div class="text-sm">${isLoadingNeteaseTracks ? '首次打开会从网易云拉取曲目' : (selectedPlaylist?.isNetease ? '曲目加载后会显示在这里' : emptyTrackHint)}</div>
                             </div>
                         `}
                     </div>
@@ -1957,6 +3179,16 @@
             });
         }
 
+        document.querySelectorAll('[data-ai-recommendation-playlist]').forEach(el => {
+            el.addEventListener('click', () => {
+                const playlist = selectAIRecommendationPlaylist();
+                if (!playlist) return;
+
+                render();
+                scrollLibraryTrackListIntoView();
+            });
+        });
+
         document.querySelectorAll('[data-netease-playlist-id]').forEach(el => {
             el.addEventListener('click', () => {
                 selectNeteasePlaylist(el.dataset.neteasePlaylistId);
@@ -1971,9 +3203,11 @@
 
                 selectedPlaylist = playlist;
                 if (!tracks.some(track => track.filePath && track.filePath.startsWith(playlist.path))) {
+                    isScanningLocalPaths = true;
                     sendToCSharp('scanFolder', JSON.stringify({ Path: playlist.path }));
                 }
                 render();
+                scrollLibraryTrackListIntoView();
             });
         });
 
@@ -2092,15 +3326,20 @@
             });
         }
 
-        document.querySelectorAll('[data-mood]').forEach(card => {
+        const startListeningBtn = document.getElementById('start-listening-btn');
+        if (startListeningBtn) {
+            startListeningBtn.addEventListener('click', startListening);
+        }
+
+        document.querySelectorAll('[data-netease-chart-id]').forEach(card => {
             card.addEventListener('click', () => {
-                currentView = 'ai-recommend';
-                render();
-                const input = document.getElementById('chat-input');
-                if (input) {
-                    input.value = `Recommend ${card.dataset.mood} music`;
-                    sendAIMessage();
-                }
+                openNeteaseChartInLibrary(card.dataset.neteaseChartId, card.dataset.chartTitle || '网易云热榜');
+            });
+        });
+
+        document.querySelectorAll('[data-mood-tag]').forEach(card => {
+            card.addEventListener('click', () => {
+                playNeteaseMood(card.dataset.moodTag);
             });
         });
 
@@ -2215,26 +3454,53 @@
         messages.push(newMessage);
         input.value = '';
         aiState = { isLoading: true, error: null };
-        aiRecommendedTracks = recommendLocalTracks(content);
         render();
         scrollChatToBottom();
 
         try {
-            const responseText = await requestAIMessage(content);
-            messages.push({
-                id: (Date.now() + 1).toString(),
-                type: 'ai',
-                content: responseText,
-                timestamp: new Date()
-            });
+            const commandResponse = await executeAIMusicCommand(content);
+            if (commandResponse) {
+                messages.push({
+                    id: (Date.now() + 1).toString(),
+                    type: 'ai',
+                    content: commandResponse,
+                    timestamp: new Date()
+                });
+            } else {
+                if (isRecommendationRequest(content)) {
+                    aiRecommendedTracks = recommendLocalTracks(content);
+                }
+
+                try {
+                    const responseText = await requestAIMessage(content);
+                    messages.push({
+                        id: (Date.now() + 1).toString(),
+                        type: 'ai',
+                        content: responseText,
+                        timestamp: new Date()
+                    });
+                } catch (error) {
+                    const fallbackText = isRecommendationRequest(content)
+                        ? buildLocalRecommendationText(content, aiRecommendedTracks)
+                        : (error instanceof Error ? error.message : 'AI service is unavailable.');
+                    messages.push({
+                        id: (Date.now() + 1).toString(),
+                        type: 'ai',
+                        content: fallbackText,
+                        timestamp: new Date()
+                    });
+                    aiState.error = error instanceof Error ? error.message : 'AI service is unavailable.';
+                }
+            }
         } catch (error) {
+            const message = error instanceof Error ? error.message : '音乐指令执行失败。';
             messages.push({
                 id: (Date.now() + 1).toString(),
                 type: 'ai',
-                content: buildLocalRecommendationText(content, aiRecommendedTracks),
+                content: message,
                 timestamp: new Date()
             });
-            aiState.error = error instanceof Error ? error.message : 'AI service is unavailable.';
+            aiState.error = message;
         } finally {
             aiState.isLoading = false;
             render();

@@ -113,12 +113,18 @@ public class MainForm : Form
             "savePlaybackState" => WithId(dbService.SavePlaybackState(request.Data), id),
             "getWeeklyData" => WithId(dbService.GetWeeklyData(), id),
             "getPlatformData" => WithId(dbService.GetPlatformData(), id),
+            "getListeningInsights" => WithId(dbService.GetListeningInsights(), id),
             "recordListeningTime" => WithId(dbService.RecordListeningTime(request.Data), id),
             "getNeteaseStatus" => neteaseService.GetStatus(id),
             "setNeteaseApiBaseUrl" => neteaseService.SetApiBaseUrl(request.Data, id),
             "neteaseLogout" => neteaseService.Logout(id),
             "getNeteasePlaylists" => neteaseService.GetPlaylists(id),
             "getNeteasePlaylistTracks" => await neteaseService.GetPlaylistTracksAsync(request.Data, id),
+            "searchNeteaseSongs" => await neteaseService.SearchSongsAsync(request.Data, id),
+            "getNeteaseTopCharts" => await neteaseService.GetTopChartsAsync(id),
+            "getNeteaseMoodTags" => await neteaseService.GetMoodTagsAsync(id),
+            "getNeteaseExploreTracks" => await neteaseService.GetExploreTracksAsync(request.Data, id),
+            "getNeteaseMoodTracks" => await neteaseService.GetMoodTracksAsync(request.Data, id),
             _ => new WebMessageResponse { Id = id, Action = request.Action, Data = "Unknown action" }
         };
     }

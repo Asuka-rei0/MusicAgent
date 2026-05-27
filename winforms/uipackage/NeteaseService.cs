@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MusicAgentWinForms;
 
@@ -10,7 +11,22 @@ public class NeteaseService
     private readonly MusicDbContext _context;
     private readonly HttpClient _http;
     private readonly CookieContainer _cookieContainer = new();
-    private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString
+    };
+    private static readonly string[] MoodTagPriority =
+    [
+        "\u6e05\u6668",
+        "\u591c\u665a",
+        "\u5b66\u4e60",
+        "\u5de5\u4f5c",
+        "\u6cbb\u6108",
+        "\u653e\u677e",
+        "\u5b64\u72ec",
+        "\u611f\u52a8"
+    ];
     private string? _qrUnikey;
 
     public NeteaseService(MusicDbContext context)
@@ -405,7 +421,9 @@ public class NeteaseService
                 return Error(requestId, "getNeteasePlaylistTracks", "无效的歌单 ID。");
             }
 
-            if (!HasPlaylistTracks(playlistId))
+            var cachedTrackCount = GetCachedPlaylistTrackCount(playlistId);
+            var expectedTrackCount = GetExpectedPlaylistTrackCount(playlistId);
+            if (cachedTrackCount == 0 || (expectedTrackCount > 0 && cachedTrackCount < expectedTrackCount))
             {
                 await FetchAndStorePlaylistTracksAsync(playlistId);
             }
@@ -428,6 +446,176 @@ public class NeteaseService
         catch (Exception ex)
         {
             return Error(requestId, "getNeteasePlaylistTracks", ex.Message);
+        }
+    }
+
+    public async Task<WebMessageResponse> GetTopChartsAsync(string requestId = "")
+    {
+        try
+        {
+            using var doc = await GetApiAsync("/toplist/detail");
+            var charts = BuildTopChartPayload(doc.RootElement);
+            await EnrichTopChartPreviewsAsync(charts);
+            return Ok(requestId, "getNeteaseTopCharts", new
+            {
+                success = true,
+                charts,
+                message = charts.Count == 0 ? "No NetEase charts were returned by the API." : null
+            });
+        }
+        catch (Exception ex)
+        {
+            return Error(requestId, "getNeteaseTopCharts", ex.Message);
+        }
+    }
+
+    public async Task<WebMessageResponse> GetMoodTagsAsync(string requestId = "")
+    {
+        try
+        {
+            var tags = await TryBuildMoodTagsFromCatlistAsync();
+            var source = "catlist";
+            if (tags.Count == 0)
+            {
+                tags = await TryBuildMoodTagsFromHotTagsAsync();
+                source = "hot";
+            }
+
+            if (tags.Count == 0)
+            {
+                tags = MoodTagPriority
+                    .Select((name, index) => new NeteaseMoodTagPayload
+                    {
+                        Name = name,
+                        Category = "fallback",
+                        Hot = index < 4,
+                        Source = "fallback"
+                    })
+                    .ToList();
+                source = "fallback";
+            }
+
+            return Ok(requestId, "getNeteaseMoodTags", new
+            {
+                success = true,
+                source,
+                tags
+            });
+        }
+        catch (Exception ex)
+        {
+            return Error(requestId, "getNeteaseMoodTags", ex.Message);
+        }
+    }
+
+    public async Task<WebMessageResponse> GetExploreTracksAsync(string data, string requestId = "")
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<NeteaseExploreTracksRequest>(data, _jsonOptions) ?? new();
+            var playlistId = request.PlaylistId > 0 ? request.PlaylistId : ParsePlaylistIdFromRequest(data);
+            if (playlistId <= 0)
+            {
+                return Error(requestId, "getNeteaseExploreTracks", "Invalid NetEase playlist id.");
+            }
+
+            await LoadPlaylistTracksFromApiAsync(playlistId, clearExisting: true, upsertPlaylistRow: false);
+            var tracks = BuildPlaylistTrackPayload(playlistId);
+            if (!request.IncludeAll)
+            {
+                var limit = NormalizeTrackLimit(request.Limit);
+                tracks = tracks.Take(limit).ToList();
+            }
+
+            return Ok(requestId, "getNeteaseExploreTracks", new
+            {
+                success = true,
+                playlistId,
+                source = request.Source,
+                title = request.Title,
+                tracks,
+                message = tracks.Count == 0 ? "This NetEase playlist has no playable tracks." : null
+            });
+        }
+        catch (Exception ex)
+        {
+            return Error(requestId, "getNeteaseExploreTracks", ex.Message);
+        }
+    }
+
+    public async Task<WebMessageResponse> GetMoodTracksAsync(string data, string requestId = "")
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<NeteaseMoodTracksRequest>(data, _jsonOptions) ?? new();
+            var tag = string.IsNullOrWhiteSpace(request.Tag) ? MoodTagPriority[0] : request.Tag.Trim();
+            var limit = NormalizeTrackLimit(request.Limit);
+            var escapedTag = Uri.EscapeDataString(tag);
+
+            using var doc = await GetApiAsync($"/top/playlist?cat={escapedTag}&limit=12&order=hot");
+            var playlist = ReadFirstPlaylistSummary(doc.RootElement);
+            if (playlist == null || playlist.Id <= 0)
+            {
+                return Error(requestId, "getNeteaseMoodTracks", $"No NetEase playlist found for mood tag: {tag}");
+            }
+
+            await LoadPlaylistTracksFromApiAsync(playlist.Id, clearExisting: true, upsertPlaylistRow: false);
+            var tracks = BuildPlaylistTrackPayload(playlist.Id).Take(limit).ToList();
+
+            return Ok(requestId, "getNeteaseMoodTracks", new
+            {
+                success = true,
+                tag,
+                playlistId = playlist.Id,
+                playlistName = playlist.Name,
+                coverUrl = playlist.CoverUrl,
+                trackCount = playlist.TrackCount,
+                tracks,
+                message = tracks.Count == 0 ? "This NetEase mood playlist has no playable tracks." : null
+            });
+        }
+        catch (Exception ex)
+        {
+            return Error(requestId, "getNeteaseMoodTracks", ex.Message);
+        }
+    }
+
+    public async Task<WebMessageResponse> SearchSongsAsync(string data, string requestId = "")
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<NeteaseSearchSongsRequest>(data, _jsonOptions) ?? new();
+            var keywords = (!string.IsNullOrWhiteSpace(request.Keywords) ? request.Keywords : request.Keyword).Trim();
+            if (string.IsNullOrWhiteSpace(keywords))
+            {
+                return Error(requestId, "searchNeteaseSongs", "Please provide a song name or artist to search.");
+            }
+
+            var limit = NormalizeTrackLimit(request.Limit <= 0 ? 8 : request.Limit);
+            var escapedKeywords = Uri.EscapeDataString(keywords);
+            using var doc = await GetApiAsync($"/cloudsearch?keywords={escapedKeywords}&limit={limit}");
+            var tracks = BuildSearchTrackPayload(doc.RootElement, limit);
+
+            if (tracks.Count == 0)
+            {
+                using var fallbackDoc = await TryGetApiAsync($"/search?keywords={escapedKeywords}&limit={limit}");
+                if (fallbackDoc != null)
+                {
+                    tracks = BuildSearchTrackPayload(fallbackDoc.RootElement, limit);
+                }
+            }
+
+            return Ok(requestId, "searchNeteaseSongs", new
+            {
+                success = true,
+                keywords,
+                tracks,
+                message = tracks.Count == 0 ? "No NetEase songs matched this request." : null
+            });
+        }
+        catch (Exception ex)
+        {
+            return Error(requestId, "searchNeteaseSongs", ex.Message);
         }
     }
 
@@ -496,8 +684,268 @@ public class NeteaseService
         return long.TryParse(idPart, out songId) && songId > 0;
     }
 
-    private bool HasPlaylistTracks(long playlistId) =>
-        _context.NeteasePlaylistTracks.Any(t => t.PlaylistExternalId == playlistId);
+    private static int NormalizeTrackLimit(int limit) =>
+        Math.Clamp(limit <= 0 ? 40 : limit, 1, 80);
+
+    private static List<NeteaseChartPayload> BuildTopChartPayload(JsonElement root)
+    {
+        var charts = new List<NeteaseChartPayload>();
+        if (!root.TryGetProperty("list", out var list) || list.ValueKind != JsonValueKind.Array)
+        {
+            return charts;
+        }
+
+        foreach (var item in list.EnumerateArray())
+        {
+            var playlistId = ReadLong(item, "id");
+            if (playlistId <= 0) continue;
+
+            var name = ReadString(item, "name");
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            charts.Add(new NeteaseChartPayload
+            {
+                PlaylistId = playlistId,
+                Name = name,
+                Description = ReadString(item, "description"),
+                CoverUrl = ReadCover(item),
+                TrackCount = (int)ReadLong(item, "trackCount"),
+                UpdateFrequency = ReadString(item, "updateFrequency"),
+                Tracks = ReadChartPreviewTracks(item)
+            });
+        }
+
+        return charts
+            .OrderBy(chart => GetChartPriority(chart.Name))
+            .ThenBy(chart => chart.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(4)
+            .ToList();
+    }
+
+    private static int GetChartPriority(string name)
+    {
+        if (name.Contains("\u70ed\u6b4c", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (name.Contains("\u98d9\u5347", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (name.Contains("\u65b0\u6b4c", StringComparison.OrdinalIgnoreCase)) return 2;
+        if (name.Contains("\u539f\u521b", StringComparison.OrdinalIgnoreCase)) return 3;
+        return 10;
+    }
+
+    private static List<NeteaseChartTrackPreview> ReadChartPreviewTracks(JsonElement chart)
+    {
+        var previews = new List<NeteaseChartTrackPreview>();
+        if (!chart.TryGetProperty("tracks", out var tracks) || tracks.ValueKind != JsonValueKind.Array)
+        {
+            return previews;
+        }
+
+        foreach (var track in tracks.EnumerateArray().Take(3))
+        {
+            var title = ReadString(track, "first");
+            var artist = ReadString(track, "second");
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                title = ReadString(track, "name");
+            }
+            if (string.IsNullOrWhiteSpace(artist))
+            {
+                artist = ReadArtists(track);
+            }
+
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                previews.Add(new NeteaseChartTrackPreview
+                {
+                    Title = title,
+                    Artist = artist
+                });
+            }
+        }
+
+        return previews;
+    }
+
+    private async Task EnrichTopChartPreviewsAsync(List<NeteaseChartPayload> charts)
+    {
+        foreach (var chart in charts.Where(chart => chart.Tracks.Count == 0))
+        {
+            using var doc = await TryGetApiAsync($"/playlist/detail?id={chart.PlaylistId}");
+            if (doc == null)
+            {
+                continue;
+            }
+
+            var root = doc.RootElement;
+            var playlist = root.TryGetProperty("playlist", out var playlistProp) ? playlistProp : root;
+            var previews = ReadChartPreviewTracks(playlist);
+            if (previews.Count == 0)
+            {
+                previews = await FetchSongPreviewTracksAsync(CollectPlaylistSongIds(playlist).Take(3).ToList());
+            }
+
+            if (previews.Count > 0)
+            {
+                chart.Tracks = previews;
+            }
+
+            if (chart.TrackCount == 0)
+            {
+                chart.TrackCount = (int)ReadLong(playlist, "trackCount");
+            }
+
+            if (string.IsNullOrWhiteSpace(chart.CoverUrl))
+            {
+                chart.CoverUrl = ReadCover(playlist);
+            }
+        }
+    }
+
+    private async Task<List<NeteaseChartTrackPreview>> FetchSongPreviewTracksAsync(IReadOnlyList<long> songIds)
+    {
+        var ids = songIds.Where(id => id > 0).Take(3).ToList();
+        if (ids.Count == 0)
+        {
+            return [];
+        }
+
+        using var doc = await TryGetApiAsync($"/song/detail?ids={string.Join(",", ids)}");
+        if (doc == null ||
+            !doc.RootElement.TryGetProperty("songs", out var songs) ||
+            songs.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var previews = new List<NeteaseChartTrackPreview>();
+        foreach (var song in songs.EnumerateArray().Take(3))
+        {
+            var title = ReadString(song, "name");
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                continue;
+            }
+
+            previews.Add(new NeteaseChartTrackPreview
+            {
+                Title = title,
+                Artist = ReadArtists(song)
+            });
+        }
+
+        return previews;
+    }
+
+    private async Task<List<NeteaseMoodTagPayload>> TryBuildMoodTagsFromCatlistAsync()
+    {
+        using var doc = await TryGetApiAsync("/playlist/catlist");
+        if (doc == null ||
+            !doc.RootElement.TryGetProperty("sub", out var tagsElement) ||
+            tagsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var tags = tagsElement
+            .EnumerateArray()
+            .Select(tag => new NeteaseMoodTagPayload
+            {
+                Name = ReadString(tag, "name"),
+                Category = ReadLong(tag, "category").ToString(),
+                Hot = ReadBool(tag, "hot"),
+                Source = "catlist"
+            })
+            .Where(tag => !string.IsNullOrWhiteSpace(tag.Name) && tag.Category is "2" or "3")
+            .OrderBy(tag => GetMoodTagPriority(tag.Name))
+            .ThenByDescending(tag => tag.Hot)
+            .ThenBy(tag => tag.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(8)
+            .ToList();
+
+        return tags;
+    }
+
+    private async Task<List<NeteaseMoodTagPayload>> TryBuildMoodTagsFromHotTagsAsync()
+    {
+        using var doc = await TryGetApiAsync("/playlist/hot");
+        if (doc == null ||
+            !doc.RootElement.TryGetProperty("tags", out var tagsElement) ||
+            tagsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var allTags = tagsElement
+            .EnumerateArray()
+            .Select(tag => new NeteaseMoodTagPayload
+            {
+                Name = ReadString(tag, "name"),
+                Category = ReadString(tag, "category"),
+                Hot = true,
+                Source = "hot"
+            })
+            .Where(tag => !string.IsNullOrWhiteSpace(tag.Name))
+            .ToList();
+
+        var prioritized = allTags
+            .Where(tag => GetMoodTagPriority(tag.Name) < 100)
+            .OrderBy(tag => GetMoodTagPriority(tag.Name))
+            .Take(8)
+            .ToList();
+
+        return prioritized.Count > 0 ? prioritized : allTags.Take(8).ToList();
+    }
+
+    private static int GetMoodTagPriority(string name)
+    {
+        var index = Array.FindIndex(MoodTagPriority, tag => tag.Equals(name, StringComparison.OrdinalIgnoreCase));
+        return index >= 0 ? index : 100;
+    }
+
+    private static bool ReadBool(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var prop)) return false;
+        return prop.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Number => prop.TryGetInt32(out var number) && number != 0,
+            JsonValueKind.String => bool.TryParse(prop.GetString(), out var parsed) && parsed,
+            _ => false
+        };
+    }
+
+    private static NeteasePlaylistSummaryPayload? ReadFirstPlaylistSummary(JsonElement root)
+    {
+        if (!root.TryGetProperty("playlists", out var playlists) || playlists.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var item in playlists.EnumerateArray())
+        {
+            var id = ReadLong(item, "id");
+            if (id <= 0) continue;
+
+            return new NeteasePlaylistSummaryPayload
+            {
+                Id = id,
+                Name = ReadString(item, "name"),
+                CoverUrl = ReadCover(item),
+                TrackCount = (int)ReadLong(item, "trackCount")
+            };
+        }
+
+        return null;
+    }
+
+    private int GetCachedPlaylistTrackCount(long playlistId) =>
+        _context.NeteasePlaylistTracks.Count(t => t.PlaylistExternalId == playlistId);
+
+    private int GetExpectedPlaylistTrackCount(long playlistId) =>
+        _context.NeteasePlaylists
+            .Where(p => p.ExternalId == playlistId)
+            .Select(p => p.TrackCount)
+            .FirstOrDefault();
 
     private List<object> BuildPlaylistTrackPayload(long playlistId) =>
         _context.NeteasePlaylistTracks
@@ -519,6 +967,72 @@ public class NeteaseService
             })
             .Cast<object>()
             .ToList();
+
+    private List<object> BuildSearchTrackPayload(JsonElement root, int limit)
+    {
+        var tracks = new List<object>();
+        if (!TryGetSongArray(root, out var songs))
+        {
+            return tracks;
+        }
+
+        foreach (var song in songs.EnumerateArray().Take(limit))
+        {
+            var songId = ReadLong(song, "id");
+            if (songId <= 0)
+            {
+                continue;
+            }
+
+            AddPlaylistTrackEntity(0, song);
+            tracks.Add(BuildTrackPayload(song));
+        }
+
+        _context.SaveChanges();
+        return tracks;
+    }
+
+    private static bool TryGetSongArray(JsonElement root, out JsonElement songs)
+    {
+        songs = default;
+        if (root.TryGetProperty("result", out var result) &&
+            result.ValueKind == JsonValueKind.Object &&
+            result.TryGetProperty("songs", out var resultSongs) &&
+            resultSongs.ValueKind == JsonValueKind.Array)
+        {
+            songs = resultSongs;
+            return true;
+        }
+
+        if (root.TryGetProperty("songs", out var directSongs) &&
+            directSongs.ValueKind == JsonValueKind.Array)
+        {
+            songs = directSongs;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static object BuildTrackPayload(JsonElement track)
+    {
+        var songId = ReadLong(track, "id");
+        var durationMs = ReadDurationMs(track);
+        return new
+        {
+            id = $"netease-{songId}",
+            songId,
+            title = ReadString(track, "name"),
+            artist = ReadArtists(track),
+            album = ReadAlbumName(track),
+            durationMs,
+            duration = FormatDuration(durationMs),
+            coverUrl = ReadTrackCover(track),
+            filePath = "",
+            sourceUri = $"netease:{songId}",
+            isNetease = true
+        };
+    }
 
     private Task FetchAndStorePlaylistTracksAsync(long playlistId) =>
         LoadPlaylistTracksFromApiAsync(playlistId, clearExisting: true, upsertPlaylistRow: true);
@@ -625,7 +1139,7 @@ public class NeteaseService
 
     private async Task StoreTracksFromSongDetailAsync(long playlistId, IReadOnlyList<long> songIds)
     {
-        foreach (var batch in songIds.Take(500).Chunk(80))
+        foreach (var batch in songIds.Chunk(80))
         {
             var idQuery = string.Join(",", batch);
             using var trackDoc = await GetApiAsync($"/song/detail?ids={idQuery}");
@@ -689,7 +1203,7 @@ public class NeteaseService
             existing.Title = ReadString(track, "name");
             existing.Artist = ReadArtists(track);
             existing.Album = ReadAlbumName(track);
-            existing.DurationMs = (int)ReadLong(track, "dt");
+            existing.DurationMs = ReadDurationMs(track);
             if (!string.IsNullOrWhiteSpace(coverUrl))
             {
                 existing.CoverUrl = coverUrl;
@@ -705,7 +1219,7 @@ public class NeteaseService
             Title = ReadString(track, "name"),
             Artist = ReadArtists(track),
             Album = ReadAlbumName(track),
-            DurationMs = (int)ReadLong(track, "dt"),
+            DurationMs = ReadDurationMs(track),
             CoverUrl = coverUrl
         });
     }
@@ -1135,16 +1649,25 @@ public class NeteaseService
 
     private static string ReadArtists(JsonElement track)
     {
-        if (!track.TryGetProperty("ar", out var ar) || ar.ValueKind != JsonValueKind.Array)
+        foreach (var propertyName in new[] { "ar", "artists" })
         {
-            return "Unknown Artist";
+            if (!track.TryGetProperty(propertyName, out var artists) || artists.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            var names = artists.EnumerateArray()
+                .Select(artist => ReadString(artist, "name"))
+                .Where(name => !string.IsNullOrWhiteSpace(name));
+            var joined = string.Join(" / ", names);
+            if (!string.IsNullOrWhiteSpace(joined))
+            {
+                return joined;
+            }
         }
 
-        var names = ar.EnumerateArray()
-            .Select(artist => ReadString(artist, "name"))
-            .Where(name => !string.IsNullOrWhiteSpace(name));
-        var joined = string.Join(" / ", names);
-        return string.IsNullOrWhiteSpace(joined) ? "Unknown Artist" : joined;
+        var direct = ReadString(track, "artist");
+        return string.IsNullOrWhiteSpace(direct) ? "Unknown Artist" : direct;
     }
 
     private static string ReadAlbumName(JsonElement track)
@@ -1155,7 +1678,32 @@ public class NeteaseService
             if (!string.IsNullOrWhiteSpace(name)) return name;
         }
 
-        return ReadString(track, "album");
+        if (track.TryGetProperty("album", out var album))
+        {
+            if (album.ValueKind == JsonValueKind.Object)
+            {
+                var name = ReadString(album, "name");
+                if (!string.IsNullOrWhiteSpace(name)) return name;
+            }
+
+            if (album.ValueKind == JsonValueKind.String)
+            {
+                return album.GetString() ?? "";
+            }
+        }
+
+        return "";
+    }
+
+    private static int ReadDurationMs(JsonElement track)
+    {
+        var value = ReadLong(track, "dt");
+        if (value <= 0)
+        {
+            value = ReadLong(track, "duration");
+        }
+
+        return value <= 0 ? 0 : (int)Math.Min(value, int.MaxValue);
     }
 
     private static string ReadTrackCover(JsonElement track)
@@ -1322,6 +1870,56 @@ public class NeteasePlaylistTrack
     public string CoverUrl { get; set; } = "";
 }
 
+public class NeteaseChartPayload
+{
+    [JsonPropertyName("playlistId")]
+    public long PlaylistId { get; set; }
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = "";
+    [JsonPropertyName("coverUrl")]
+    public string CoverUrl { get; set; } = "";
+    [JsonPropertyName("trackCount")]
+    public int TrackCount { get; set; }
+    [JsonPropertyName("updateFrequency")]
+    public string UpdateFrequency { get; set; } = "";
+    [JsonPropertyName("tracks")]
+    public List<NeteaseChartTrackPreview> Tracks { get; set; } = new();
+}
+
+public class NeteaseChartTrackPreview
+{
+    [JsonPropertyName("title")]
+    public string Title { get; set; } = "";
+    [JsonPropertyName("artist")]
+    public string Artist { get; set; } = "";
+}
+
+public class NeteaseMoodTagPayload
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+    [JsonPropertyName("category")]
+    public string Category { get; set; } = "";
+    [JsonPropertyName("hot")]
+    public bool Hot { get; set; }
+    [JsonPropertyName("source")]
+    public string Source { get; set; } = "";
+}
+
+public class NeteasePlaylistSummaryPayload
+{
+    [JsonPropertyName("id")]
+    public long Id { get; set; }
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+    [JsonPropertyName("coverUrl")]
+    public string CoverUrl { get; set; } = "";
+    [JsonPropertyName("trackCount")]
+    public int TrackCount { get; set; }
+}
+
 public class NeteaseTrackMetadata
 {
     public long SongId { get; set; }
@@ -1340,4 +1938,26 @@ public class NeteaseApiBaseUrlRequest
 public class NeteasePlaylistTracksRequest
 {
     public long PlaylistId { get; set; }
+}
+
+public class NeteaseExploreTracksRequest
+{
+    public long PlaylistId { get; set; }
+    public string Source { get; set; } = "";
+    public string Title { get; set; } = "";
+    public int Limit { get; set; } = 40;
+    public bool IncludeAll { get; set; }
+}
+
+public class NeteaseMoodTracksRequest
+{
+    public string Tag { get; set; } = "";
+    public int Limit { get; set; } = 40;
+}
+
+public class NeteaseSearchSongsRequest
+{
+    public string Keywords { get; set; } = "";
+    public string Keyword { get; set; } = "";
+    public int Limit { get; set; } = 8;
 }
