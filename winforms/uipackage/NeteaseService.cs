@@ -1442,18 +1442,6 @@ public class NeteaseService
             }
         }
 
-        using (var allDoc = await TryGetApiAsync($"/user/record?uid={uid}&type=0"))
-        {
-            if (allDoc != null)
-            {
-                imported += ImportListeningRecordItems(allDoc.RootElement, "allData", maxPerSong: 8);
-            }
-            else
-            {
-                warnings.Add("总听歌排行获取失败");
-            }
-        }
-
         _context.SaveChanges();
 
         string? warning = null;
