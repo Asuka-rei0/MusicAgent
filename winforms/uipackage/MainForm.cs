@@ -12,6 +12,11 @@ public class MainForm : Form
     private FileService fileService = null!;
     private NeteaseService neteaseService = null!;
     private readonly JsonSerializerOptions jsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private bool isImmersiveFullscreen;
+    private FormBorderStyle previousFormBorderStyle;
+    private FormWindowState previousWindowState;
+    private Rectangle previousBounds;
+    private bool previousTopMost;
 
     public MainForm()
     {
@@ -125,8 +130,54 @@ public class MainForm : Form
             "getNeteaseMoodTags" => await neteaseService.GetMoodTagsAsync(id),
             "getNeteaseExploreTracks" => await neteaseService.GetExploreTracksAsync(request.Data, id),
             "getNeteaseMoodTracks" => await neteaseService.GetMoodTracksAsync(request.Data, id),
+            "enterImmersivePlayer" => SetImmersiveFullscreen(true, id),
+            "exitImmersivePlayer" => SetImmersiveFullscreen(false, id),
             _ => new WebMessageResponse { Id = id, Action = request.Action, Data = "Unknown action" }
         };
+    }
+
+    private WebMessageResponse SetImmersiveFullscreen(bool enabled, string id)
+    {
+        if (enabled)
+        {
+            EnterImmersiveFullscreen();
+            return new WebMessageResponse { Id = id, Action = "enterImmersivePlayer", Data = "OK" };
+        }
+
+        ExitImmersiveFullscreen();
+        return new WebMessageResponse { Id = id, Action = "exitImmersivePlayer", Data = "OK" };
+    }
+
+    private void EnterImmersiveFullscreen()
+    {
+        if (isImmersiveFullscreen) return;
+
+        isImmersiveFullscreen = true;
+        previousFormBorderStyle = FormBorderStyle;
+        previousWindowState = WindowState;
+        previousBounds = Bounds;
+        previousTopMost = TopMost;
+
+        SuspendLayout();
+        WindowState = FormWindowState.Normal;
+        FormBorderStyle = FormBorderStyle.None;
+        TopMost = true;
+        Bounds = Screen.FromControl(this).Bounds;
+        ResumeLayout();
+    }
+
+    private void ExitImmersiveFullscreen()
+    {
+        if (!isImmersiveFullscreen) return;
+
+        SuspendLayout();
+        TopMost = previousTopMost;
+        FormBorderStyle = previousFormBorderStyle;
+        Bounds = previousBounds;
+        WindowState = previousWindowState;
+        ResumeLayout();
+
+        isImmersiveFullscreen = false;
     }
 
     private async Task<WebMessageResponse> GetLyricsAsync(string data)

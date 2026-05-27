@@ -24,6 +24,11 @@
     let currentSourceUri = '';
     let loadedLyricsKey = '';
     let lastActiveLyricIndex = -1;
+    let isImmersivePlayerOpen = false;
+    let lastImmersiveLyricIndex = -1;
+    let immersiveControlsHideTimer = null;
+    let currentImmersivePaletteKey = '';
+    let immersivePaletteCache = new Map();
     let listeningBufferSeconds = 0;
     let lastProgressFilePath = '';
     let lastProgressTime = 0;
@@ -88,6 +93,7 @@
             window.addEventListener('message', handleWebMessage);
         }
         window.addEventListener('beforeunload', () => savePlaybackState(currentTime, true));
+        window.addEventListener('keydown', handleGlobalKeyDown);
         loadInitialData();
         applyTheme();
         render();
@@ -96,7 +102,16 @@
             if (currentView === 'ai-recommend') {
                 updateLyricsPadding();
             }
+            if (isImmersivePlayerOpen) {
+                updateImmersiveLyricsPadding();
+            }
         });
+    }
+
+    function handleGlobalKeyDown(event) {
+        if (event.key === 'Escape' && isImmersivePlayerOpen) {
+            closeImmersivePlayer();
+        }
     }
 
     function handleWebMessage(event) {
@@ -517,6 +532,7 @@
         }
 
         syncLyricHighlight();
+        updateImmersivePlayer();
 
         if (currentSourceUri && currentSourceUri !== previousSourceUri) {
             savePlaybackState(0, true);
@@ -914,24 +930,25 @@
     function getNowPlayingSnapshot() {
         const source = currentSourceUri || currentFilePath;
         const knownTrack = findTrackBySource(source);
+        const queueTrack = findActiveQueueTrackBySource(source);
         const title = isMeaningfulTrackTitle(currentTrackTitle)
             ? currentTrackTitle
-            : (knownTrack?.title || (source ? getFileNameWithoutExtension(source) : ''));
+            : (knownTrack?.title || queueTrack?.title || (source ? getFileNameWithoutExtension(source) : ''));
         const artist = isMeaningfulArtist(currentTrackArtist)
             ? currentTrackArtist
-            : (knownTrack?.artist || 'Unknown Artist');
+            : (knownTrack?.artist || queueTrack?.artist || 'Unknown Artist');
         const hasTrack = Boolean(source || isMeaningfulTrackTitle(title));
         const track = hasTrack
             ? normalizeTrack({
-                id: knownTrack?.id || source || title,
-                songId: knownTrack?.songId || parseNeteaseSongId(source),
-                isNetease: knownTrack?.isNetease || isNeteaseSource(source),
+                id: knownTrack?.id || queueTrack?.id || source || title,
+                songId: knownTrack?.songId || queueTrack?.songId || parseNeteaseSongId(source),
+                isNetease: knownTrack?.isNetease || queueTrack?.isNetease || isNeteaseSource(source),
                 title,
                 artist,
-                album: knownTrack?.album || (isNeteaseSource(source) ? '网易云音乐' : 'Local Music'),
-                duration: duration ? formatTime(duration) : (knownTrack?.duration || '--:--'),
-                durationMs: duration ? duration * 1000 : (knownTrack?.durationMs || null),
-                coverUrl: currentCoverUrl || knownTrack?.coverUrl || '',
+                album: knownTrack?.album || queueTrack?.album || (isNeteaseSource(source) ? '网易云音乐' : 'Local Music'),
+                duration: duration ? formatTime(duration) : (knownTrack?.duration || queueTrack?.duration || '--:--'),
+                durationMs: duration ? duration * 1000 : (knownTrack?.durationMs || queueTrack?.durationMs || null),
+                coverUrl: currentCoverUrl || knownTrack?.coverUrl || queueTrack?.coverUrl || '',
                 filePath: isNeteaseSource(source) ? '' : source,
                 sourceUri: source
             })
@@ -1122,6 +1139,9 @@
         if (currentView === 'ai-recommend') {
             renderLyricsPanel();
         }
+        if (isImmersivePlayerOpen) {
+            renderImmersiveLyricsPanel();
+        }
     }
 
     function applyLyricsResponse(data) {
@@ -1152,6 +1172,9 @@
         lastActiveLyricIndex = -1;
         if (currentView === 'ai-recommend') {
             renderLyricsPanel();
+        }
+        if (isImmersivePlayerOpen) {
+            renderImmersiveLyricsPanel();
         }
     }
 
@@ -1197,7 +1220,8 @@
     }
 
     function isLyricMetadata(text) {
-        return /^(ti|ar|al|by|offset|id|ve|key|hash|sign|qq|total):/i.test(text);
+        return /^(ti|ar|al|by|offset|id|ve|key|hash|sign|qq|total)\s*:/i.test(text)
+            || /^(作词|作曲|编曲|制作人|制作|监制|录音|混音|母带|和声|吉他|贝斯|鼓|键盘|钢琴|弦乐|人声|配唱|出品|发行|词曲|原唱|翻唱|OP|SP|ISRC|企划|统筹|封面|设计)\s*[:：]/i.test(text);
     }
 
     function parseLrc(content) {
@@ -1427,6 +1451,14 @@
 
         restoreSavedPlaylistContext(settings.lastPlaybackPlaylist, savedQueue);
         activePlaybackQueue = getPlayableQueue(savedQueue);
+        if (activePlaybackQueue.length > 0) {
+            activePlaybackQueue = activePlaybackQueue.map(queueTrack => {
+                const savedTrack = savedQueue.find(track =>
+                    normalizePathForCompare(getTrackSource(track)) === normalizePathForCompare(queueTrack.sourceUri)
+                );
+                return savedTrack ? { ...queueTrack, ...normalizeTrack(savedTrack), sourceUri: queueTrack.sourceUri } : queueTrack;
+            });
+        }
         activePlaybackPlaylist = settings.lastPlaybackPlaylist || null;
         pendingRestoreTime = Math.max(0, Number(settings.lastPlaybackTime) || 0);
         hasAutoRestoredPlayback = true;
@@ -1560,14 +1592,19 @@
     }
 
     function toQueueTrack(track, index) {
-        const sourceUri = track.sourceUri || track.filePath || '';
+        const normalized = normalizeTrack(track);
+        const sourceUri = normalized.sourceUri || normalized.filePath || '';
         return {
-            id: String(track.id || sourceUri || `track-${index}`),
-            title: track.title || getFileNameWithoutExtension(sourceUri),
-            artist: track.artist || 'Unknown Artist',
+            id: String(normalized.id || sourceUri || `track-${index}`),
+            songId: normalized.songId || parseNeteaseSongId(sourceUri),
+            isNetease: Boolean(normalized.isNetease || isNeteaseSource(sourceUri)),
+            title: normalized.title || getFileNameWithoutExtension(sourceUri),
+            artist: normalized.artist || 'Unknown Artist',
+            album: normalized.album || (isNeteaseSource(sourceUri) ? '网易云音乐' : 'Local Music'),
             sourceUri,
-            coverUrl: track.coverUrl || '',
-            durationMs: track.durationMs || null
+            coverUrl: normalized.coverUrl || '',
+            duration: normalized.duration || '--:--',
+            durationMs: normalized.durationMs || null
         };
     }
 
@@ -2804,6 +2841,476 @@
         `;
     }
 
+    function getCssImageUrl(value) {
+        const url = String(value || getDefaultCover()).replace(/[\r\n]/g, '').replace(/'/g, '%27');
+        return `url('${url}')`;
+    }
+
+    function getImmersiveDisplayState() {
+        const snapshot = getNowPlayingSnapshot();
+        const track = snapshot.track;
+        const title = track?.title || (isMeaningfulTrackTitle(currentTrackTitle) ? currentTrackTitle : 'No track selected');
+        const artist = track?.artist || (isMeaningfulArtist(currentTrackArtist) ? currentTrackArtist : 'Unknown Artist');
+        const album = track?.album || (snapshot.sourceUri ? getParentFolderName(snapshot.sourceUri) : 'MusicAgent');
+        const coverUrl = track?.coverUrl || currentCoverUrl || getDefaultCover();
+        const sourceLabel = track?.isNetease ? '网易云音乐' : '本地曲库';
+        const progressPercent = duration > 0
+            ? Math.max(0, Math.min(100, (currentTime / duration) * 100))
+            : Math.max(0, Math.min(100, progress || 0));
+
+        return {
+            title,
+            artist,
+            album,
+            contextName: getCurrentPlaybackContextName(),
+            coverUrl,
+            sourceLabel,
+            progressPercent,
+            durationText: duration > 0 ? formatTime(duration) : (track?.duration || '--:--')
+        };
+    }
+
+    function getCurrentPlaybackContextName() {
+        const contextName = activePlaybackPlaylist?.name || selectedPlaylist?.name || '';
+        return String(contextName || '').trim();
+    }
+
+    function findActiveQueueTrackBySource(source) {
+        const normalizedSource = normalizePathForCompare(source);
+        if (!normalizedSource) return null;
+
+        return activePlaybackQueue
+            .map(normalizeTrack)
+            .find(track => normalizePathForCompare(getTrackSource(track)) === normalizedSource) || null;
+    }
+
+    function openImmersivePlayer() {
+        isImmersivePlayerOpen = true;
+        lastImmersiveLyricIndex = -1;
+        const source = currentSourceUri || currentFilePath;
+        if (source) {
+            requestLyricsForSource(source);
+        }
+        sendToCSharp('enterImmersivePlayer');
+        render();
+        showImmersiveControls();
+        refreshImmersiveAccentFromCover();
+    }
+
+    function closeImmersivePlayer() {
+        isImmersivePlayerOpen = false;
+        clearImmersiveControlsTimer();
+        sendToCSharp('exitImmersivePlayer');
+        render();
+    }
+
+    function renderImmersivePlayer() {
+        const state = getImmersiveDisplayState();
+        return `
+            <div id="immersive-player" class="immersive-player" style="--immersive-cover: ${escapeHtml(getCssImageUrl(state.coverUrl))}; --immersive-progress: ${state.progressPercent}%;">
+                <div class="immersive-chromatic" aria-hidden="true"></div>
+                <div class="immersive-cover-echo" aria-hidden="true"></div>
+                <div class="immersive-colorwash" aria-hidden="true"></div>
+                <div class="immersive-grain" aria-hidden="true"></div>
+                <button id="immersive-close-btn" class="immersive-close" type="button" title="返回" aria-label="返回">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                </button>
+                <div class="immersive-layout">
+                    <section class="immersive-copy">
+                        <div class="immersive-cover">
+                            <img id="immersive-cover-img" src="${escapeHtml(state.coverUrl)}" alt="${escapeHtml(state.title)}" onerror="this.onerror=null;this.src='${escapeHtml(getDefaultCover())}'">
+                        </div>
+                        <h1 id="immersive-title" class="immersive-title">${escapeHtml(state.title)}</h1>
+                        <div id="immersive-artist" class="immersive-artist">${escapeHtml(state.artist)}</div>
+                        <div class="immersive-meta">
+                            <span id="immersive-album-source">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-2v13M9 19a3 3 0 11-6 0 3 3 0 016 0zm12-2a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                <span data-immersive-label>${escapeHtml(getImmersiveAlbumSourceText(state))}</span>
+                            </span>
+                        </div>
+                    </section>
+                    <section class="immersive-lyrics-wrap">
+                        ${renderImmersiveLyricsContent()}
+                    </section>
+                </div>
+                <div class="immersive-controls">
+                    <button id="immersive-play-toggle" class="immersive-play-toggle" type="button" title="${isPlaying ? '暂停' : '播放'}" aria-label="${isPlaying ? '暂停' : '播放'}">
+                        ${renderImmersivePlayIcon()}
+                    </button>
+                    <div class="immersive-timeline">
+                        <span id="immersive-current-time">${formatTime(currentTime)}</span>
+                        <input type="range" id="immersive-progress-slider" class="immersive-progress-slider" min="0" max="100" value="${state.progressPercent}" style="--immersive-progress: ${state.progressPercent}%;" aria-label="播放进度">
+                        <span id="immersive-duration-time">${escapeHtml(state.durationText)}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderImmersivePlayIcon() {
+        return isPlaying
+            ? '<svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7V5zm6.5 0H17v14h-3.5V5z"/></svg>'
+            : '<svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+    }
+
+    function renderImmersiveLyricsContent() {
+        const activeLyricIndex = getActiveLyricIndex();
+        const lineItems = lyrics.length > 0 ? lyrics : [{ text: 'No lyrics loaded', time: 0 }];
+        return `
+            <div id="immersive-lyrics-panel" class="immersive-lyrics-panel">
+                <div id="immersive-lyrics-scroll-inner" class="immersive-lyrics-inner">
+                    <div id="immersive-lyrics-pad-top" aria-hidden="true"></div>
+                    ${lineItems.map((lyric, index) => {
+                        const offset = activeLyricIndex >= 0 ? index - activeLyricIndex : index;
+                        const lineStyle = getImmersiveLyricLineStyle(offset);
+                        return `
+                            <div class="immersive-lyric-line ${index === activeLyricIndex ? 'is-active' : ''}" data-immersive-lyric-index="${index}" style="${lineStyle}">${escapeHtml(lyric.text)}</div>
+                        `;
+                    }).join('')}
+                    <div id="immersive-lyrics-pad-bottom" aria-hidden="true"></div>
+                </div>
+            </div>
+        `;
+    }
+
+    function getImmersiveLyricLineStyle(offset) {
+        const limited = Math.max(-7, Math.min(7, Number(offset) || 0));
+        const distance = Math.abs(limited);
+        const closeness = Math.max(0, 7 - distance);
+        const rotation = limited * 6.35;
+        const x = Math.pow(distance, 1.32) * 18;
+        const opacity = Math.min(0.7, 0.13 + closeness * 0.066).toFixed(3);
+        const scale = Math.min(1, 0.84 + closeness * 0.023).toFixed(3);
+        return [
+            `--line-opacity:${opacity}`,
+            `--line-scale:${scale}`,
+            `--line-rotation:${rotation.toFixed(2)}deg`,
+            `--line-x:${x.toFixed(1)}px`
+        ].join(';') + ';';
+    }
+
+    function attachImmersivePlayerEvents() {
+        const page = document.getElementById('immersive-player');
+        if (page) {
+            ['mousemove', 'pointermove', 'pointerdown'].forEach(eventName => {
+                page.addEventListener(eventName, () => showImmersiveControls());
+            });
+            scheduleImmersiveControlsHide();
+        }
+
+        const closeBtn = document.getElementById('immersive-close-btn');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', closeImmersivePlayer);
+        }
+
+        const playToggle = document.getElementById('immersive-play-toggle');
+        if (playToggle) {
+            playToggle.addEventListener('click', () => {
+                togglePlaybackFromImmersive();
+                showImmersiveControls();
+            });
+        }
+
+        const progressSlider = document.getElementById('immersive-progress-slider');
+        if (progressSlider) {
+            progressSlider.addEventListener('input', (event) => {
+                progress = parseFloat(event.target.value);
+                currentTime = duration > 0 ? (progress / 100) * duration : currentTime;
+                sendToCSharp('setProgress', progress.toString());
+                savePlaybackState(currentTime, true);
+                updateImmersivePlayer();
+                showImmersiveControls();
+            });
+        }
+    }
+
+    function togglePlaybackFromImmersive() {
+        if (isPlaying) {
+            savePlaybackState(currentTime, true);
+            isPlaying = false;
+            sendToCSharp('pause');
+        } else if (currentFilePath) {
+            isPlaying = true;
+            sendToCSharp('resume');
+        } else if (getPlayableQueue().length > 0) {
+            playTrackFromQueue(0);
+            return;
+        } else if (localPaths.length > 0) {
+            scanAllLocalPaths();
+            return;
+        } else {
+            promptAndPlayFile();
+            return;
+        }
+
+        renderPlayer();
+        updateImmersivePlayer();
+    }
+
+    function showImmersiveControls() {
+        const page = document.getElementById('immersive-player');
+        if (!page) return;
+
+        page.classList.remove('is-controls-hidden');
+        scheduleImmersiveControlsHide();
+    }
+
+    function scheduleImmersiveControlsHide(delay = 2600) {
+        clearImmersiveControlsTimer();
+        if (!isImmersivePlayerOpen) return;
+
+        immersiveControlsHideTimer = setTimeout(() => {
+            const page = document.getElementById('immersive-player');
+            if (page) page.classList.add('is-controls-hidden');
+        }, delay);
+    }
+
+    function clearImmersiveControlsTimer() {
+        if (immersiveControlsHideTimer) {
+            clearTimeout(immersiveControlsHideTimer);
+            immersiveControlsHideTimer = null;
+        }
+    }
+
+    function renderImmersiveLyricsPanel() {
+        const lyricsPanel = document.getElementById('immersive-lyrics-panel');
+        if (lyricsPanel) {
+            lyricsPanel.outerHTML = renderImmersiveLyricsContent();
+            requestAnimationFrame(() => {
+                updateImmersiveLyricsPadding();
+                lastImmersiveLyricIndex = -1;
+                syncImmersiveLyricHighlight();
+            });
+        }
+    }
+
+    function updateImmersiveLyricsPadding() {
+        const container = document.getElementById('immersive-lyrics-panel');
+        const padTop = document.getElementById('immersive-lyrics-pad-top');
+        const padBottom = document.getElementById('immersive-lyrics-pad-bottom');
+        if (!container || !padTop || !padBottom) return;
+
+        const half = Math.max(container.clientHeight / 2, 160);
+        padTop.style.height = `${half}px`;
+        padBottom.style.height = `${half}px`;
+    }
+
+    function syncImmersiveLyricHighlight() {
+        const container = document.getElementById('immersive-lyrics-panel');
+        if (!container) return;
+
+        const activeLyricIndex = getActiveLyricIndex();
+        const indexChanged = activeLyricIndex !== lastImmersiveLyricIndex;
+        lastImmersiveLyricIndex = activeLyricIndex;
+
+        document.querySelectorAll('[data-immersive-lyric-index]').forEach(line => {
+            const lineIndex = Number(line.dataset.immersiveLyricIndex);
+            const isActive = lineIndex === activeLyricIndex;
+            line.classList.toggle('is-active', isActive);
+            const offset = activeLyricIndex >= 0 ? lineIndex - activeLyricIndex : lineIndex;
+            getImmersiveLyricLineStyle(offset)
+                .split(';')
+                .filter(Boolean)
+                .forEach(part => {
+                    const [name, value] = part.split(':');
+                    if (name && value) line.style.setProperty(name.trim(), value.trim());
+                });
+        });
+
+        const scrollIndex = activeLyricIndex >= 0 ? activeLyricIndex : 0;
+        const activeLine = document.querySelector(`[data-immersive-lyric-index="${scrollIndex}"]`);
+        if (activeLine && indexChanged) {
+            scrollLyricLineIntoCenter(container, activeLine);
+        }
+    }
+
+    function updateImmersivePlayer() {
+        const page = document.getElementById('immersive-player');
+        if (!page) return;
+
+        const state = getImmersiveDisplayState();
+        page.style.setProperty('--immersive-cover', getCssImageUrl(state.coverUrl));
+        page.style.setProperty('--immersive-progress', `${state.progressPercent}%`);
+        refreshImmersiveAccentFromCover(state);
+
+        const coverImg = document.getElementById('immersive-cover-img');
+        if (coverImg && coverImg.getAttribute('src') !== state.coverUrl) {
+            coverImg.setAttribute('src', state.coverUrl);
+            coverImg.setAttribute('alt', state.title);
+        }
+
+        const titleEl = document.getElementById('immersive-title');
+        if (titleEl) titleEl.textContent = state.title;
+
+        const artistEl = document.getElementById('immersive-artist');
+        if (artistEl) artistEl.textContent = state.artist;
+
+        updateImmersiveMetaText('immersive-album-source', getImmersiveAlbumSourceText(state));
+
+        const playToggle = document.getElementById('immersive-play-toggle');
+        if (playToggle) {
+            playToggle.innerHTML = renderImmersivePlayIcon();
+            playToggle.setAttribute('title', isPlaying ? '暂停' : '播放');
+            playToggle.setAttribute('aria-label', isPlaying ? '暂停' : '播放');
+        }
+
+        const currentTimeEl = document.getElementById('immersive-current-time');
+        if (currentTimeEl) currentTimeEl.textContent = formatTime(currentTime);
+
+        const durationTimeEl = document.getElementById('immersive-duration-time');
+        if (durationTimeEl) durationTimeEl.textContent = state.durationText;
+
+        const progressSlider = document.getElementById('immersive-progress-slider');
+        if (progressSlider) {
+            progressSlider.value = state.progressPercent;
+            progressSlider.style.setProperty('--immersive-progress', `${state.progressPercent}%`);
+        }
+
+        syncImmersiveLyricHighlight();
+    }
+
+    function updateImmersiveMetaText(id, text) {
+        const el = document.querySelector(`#${id} [data-immersive-label]`);
+        if (el) el.textContent = text;
+    }
+
+    function getImmersiveAlbumSourceText(state) {
+        const album = String(state?.album || '').trim();
+        const contextName = String(state?.contextName || '').trim();
+        const sourceLabel = String(state?.sourceLabel || '').trim();
+        if (album && album !== 'Local Music' && album !== '网易云音乐') return album;
+        if (contextName) return contextName;
+        if (sourceLabel && sourceLabel !== '网易云音乐') return sourceLabel;
+        return album && album !== '网易云音乐' ? album : 'MusicAgent';
+    }
+
+    function refreshImmersiveAccentFromCover(state = getImmersiveDisplayState()) {
+        const page = document.getElementById('immersive-player');
+        if (!page) return;
+
+        const key = `${state.coverUrl}|${state.title}`;
+        const cachedPalette = immersivePaletteCache.get(key);
+        if (cachedPalette) {
+            applyImmersivePalette(page, cachedPalette);
+            currentImmersivePaletteKey = key;
+            return;
+        }
+
+        const fallbackPalette = getFallbackPalette(key);
+        applyImmersivePalette(page, fallbackPalette);
+        if (currentImmersivePaletteKey === key) return;
+        currentImmersivePaletteKey = key;
+
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.onload = () => {
+            try {
+                const palette = extractPaletteFromImage(image) || fallbackPalette;
+                immersivePaletteCache.set(key, palette);
+                const activeState = getImmersiveDisplayState();
+                const activeKey = `${activeState.coverUrl}|${activeState.title}`;
+                const activePage = document.getElementById('immersive-player');
+                if (activeKey === key && activePage) {
+                    applyImmersivePalette(activePage, palette);
+                }
+            } catch {
+                immersivePaletteCache.set(key, fallbackPalette);
+                const activePage = document.getElementById('immersive-player');
+                if (activePage) applyImmersivePalette(activePage, fallbackPalette);
+            }
+        };
+        image.onerror = () => {
+            immersivePaletteCache.set(key, fallbackPalette);
+            const activePage = document.getElementById('immersive-player');
+            if (activePage) applyImmersivePalette(activePage, fallbackPalette);
+        };
+        image.src = state.coverUrl || getDefaultCover();
+    }
+
+    function extractPaletteFromImage(image) {
+        const canvas = document.createElement('canvas');
+        const size = 32;
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        if (!context) return null;
+
+        context.drawImage(image, 0, 0, size, size);
+        const data = context.getImageData(0, 0, size, size).data;
+        const buckets = [];
+        for (let i = 0; i < data.length; i += 16) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            const saturation = max === 0 ? 0 : (max - min) / max;
+            const lightness = (max + min) / 510;
+            if (lightness < 0.12 || lightness > 0.88 || saturation < 0.12) continue;
+            buckets.push({ r, g, b, score: saturation * 1.8 + lightness });
+        }
+
+        if (buckets.length === 0) return null;
+        buckets.sort((a, b) => b.score - a.score);
+        const accent = buckets[0];
+        const soft = buckets[Math.min(8, buckets.length - 1)] || accent;
+        const shadow = {
+            r: Math.max(2, Math.round(accent.r * 0.08)),
+            g: Math.max(6, Math.round(accent.g * 0.08)),
+            b: Math.max(12, Math.round(accent.b * 0.09))
+        };
+        return { accent, soft, shadow };
+    }
+
+    function applyImmersivePalette(page, palette) {
+        page.style.setProperty('--accent-rgb', `${palette.accent.r}, ${palette.accent.g}, ${palette.accent.b}`);
+        page.style.setProperty('--accent-soft-rgb', `${palette.soft.r}, ${palette.soft.g}, ${palette.soft.b}`);
+        page.style.setProperty('--shadow-rgb', `${palette.shadow.r}, ${palette.shadow.g}, ${palette.shadow.b}`);
+    }
+
+    function getFallbackPalette(seed) {
+        let hash = 0;
+        String(seed || '').split('').forEach(char => {
+            hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+        });
+        const hue = Math.abs(hash) % 360;
+        const accent = hslToRgb(hue, 72, 58);
+        const soft = hslToRgb((hue + 74) % 360, 68, 62);
+        const shadow = hslToRgb((hue + 212) % 360, 42, 8);
+        return { accent, soft, shadow };
+    }
+
+    function hslToRgb(h, s, l) {
+        const saturation = s / 100;
+        const lightness = l / 100;
+        const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+        const x = chroma * (1 - Math.abs((h / 60) % 2 - 1));
+        const m = lightness - chroma / 2;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+
+        if (h < 60) {
+            r = chroma; g = x;
+        } else if (h < 120) {
+            r = x; g = chroma;
+        } else if (h < 180) {
+            g = chroma; b = x;
+        } else if (h < 240) {
+            g = x; b = chroma;
+        } else if (h < 300) {
+            r = x; b = chroma;
+        } else {
+            r = chroma; b = x;
+        }
+
+        return {
+            r: Math.round((r + m) * 255),
+            g: Math.round((g + m) * 255),
+            b: Math.round((b + m) * 255)
+        };
+    }
+
     function render() {
         const app = document.getElementById('app');
         app.innerHTML = `
@@ -2814,6 +3321,7 @@
                 </div>
                 ${renderPlayerBar()}
             </div>
+            ${isImmersivePlayerOpen ? renderImmersivePlayer() : ''}
         `;
         attachEventListeners();
         if (currentView === 'library' && shouldScrollLibraryTrackList) {
@@ -2824,6 +3332,13 @@
                 updateLyricsPadding();
                 lastActiveLyricIndex = -1;
                 syncLyricHighlight();
+            });
+        }
+        if (isImmersivePlayerOpen) {
+            requestAnimationFrame(() => {
+                updateImmersiveLyricsPadding();
+                lastImmersiveLyricIndex = -1;
+                updateImmersivePlayer();
             });
         }
     }
@@ -3252,9 +3767,9 @@
         return `
             <div class="player-bar px-6 flex items-center gap-6 text-white">
                 <div class="flex items-center gap-4 w-80">
-                    <div class="w-16 h-16 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center overflow-hidden shrink-0">
+                    <button id="player-cover-btn" class="player-cover-button w-16 h-16 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center overflow-hidden shrink-0" type="button" title="打开全屏播放页" aria-label="打开全屏播放页">
                         <img src="${escapeHtml(currentCoverUrl || getDefaultCover())}" alt="Album" class="w-full h-full object-cover" onerror="this.onerror=null;this.src='${escapeHtml(getDefaultCover())}'">
-                    </div>
+                    </button>
                     <div class="flex-1 min-w-0">
                         <div class="font-medium truncate">${currentTrackTitle || 'No track selected'}</div>
                         <div class="text-sm text-gray-400 truncate">${currentTrackArtist || 'Unknown Artist'}</div>
@@ -3303,6 +3818,7 @@
         if (playerBar) {
             playerBar.outerHTML = renderPlayerBar();
             attachPlayerEvents();
+            updateImmersivePlayer();
         }
     }
 
@@ -3512,9 +4028,15 @@
         }
 
         attachPlayerEvents();
+        attachImmersivePlayerEvents();
     }
 
     function attachPlayerEvents() {
+        const playerCoverBtn = document.getElementById('player-cover-btn');
+        if (playerCoverBtn) {
+            playerCoverBtn.addEventListener('click', openImmersivePlayer);
+        }
+
         const playPauseBtn = document.getElementById('play-pause-btn');
         if (playPauseBtn) {
             playPauseBtn.addEventListener('click', () => {
