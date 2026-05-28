@@ -101,7 +101,7 @@ public class DatabaseService
     {
         try
         {
-            var settings = JsonSerializer.Deserialize<AppSettings>(data);
+            var settings = JsonSerializer.Deserialize<AppSettings>(data,new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (settings != null)
             {
                 var existing = _context.Settings.FirstOrDefault();
