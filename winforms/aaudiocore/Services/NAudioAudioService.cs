@@ -166,11 +166,12 @@ public sealed class NAudioAudioService : BaseAudioService
             return;
         }
 
+        var isAtEnd = IsAudioAtEnd();
         var status = waveOut?.PlaybackState switch
         {
             PlaybackState.Playing => PlaybackStatus.Playing,
             PlaybackState.Paused => PlaybackStatus.Paused,
-            PlaybackState.Stopped when audioFile.CurrentTime >= audioFile.TotalTime => PlaybackStatus.Ended,
+            PlaybackState.Stopped when isAtEnd => PlaybackStatus.Ended,
             _ => fallbackStatus
         };
 
@@ -219,10 +220,19 @@ public sealed class NAudioAudioService : BaseAudioService
             return;
         }
 
-        if (audioFile != null && audioFile.CurrentTime >= audioFile.TotalTime)
+        if (audioFile != null && IsAudioAtEnd())
         {
             if (shouldAutoplay && QueueCount > 1 && PlayNext()) return;
             UpdateStateFromReader(PlaybackStatus.Ended);
         }
+    }
+
+    private bool IsAudioAtEnd()
+    {
+        if (audioFile == null) return false;
+
+        const double EndToleranceMs = 500;
+        var remainingMs = (audioFile.TotalTime - audioFile.CurrentTime).TotalMilliseconds;
+        return remainingMs <= EndToleranceMs || audioFile.Position >= audioFile.Length;
     }
 }
