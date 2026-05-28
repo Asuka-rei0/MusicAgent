@@ -312,9 +312,9 @@
             z-index: 2;
             height: 100%;
             display: grid;
-            grid-template-columns: minmax(320px, 39vw) minmax(460px, 1fr);
+            grid-template-columns: minmax(320px, 38vw) minmax(460px, 1fr);
             align-items: center;
-            gap: clamp(38px, 6vw, 104px);
+            gap: clamp(18px, 3.4vw, 58px);
             padding: clamp(44px, 7vw, 96px) clamp(48px, 8vw, 128px) clamp(112px, 11vh, 156px);
         }
         .immersive-cover {
@@ -396,52 +396,59 @@
             max-width: 720px;
         }
         .immersive-lyrics-wrap {
-            height: min(75vh, 740px);
-            perspective: 1200px;
+            height: min(82vh, 780px);
+            perspective: 1500px;
             display: flex;
             align-items: center;
-            justify-content: center;
-            overflow: hidden;
-            -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 15%, #000 84%, transparent 100%);
-            mask-image: linear-gradient(to bottom, transparent 0%, #000 15%, #000 84%, transparent 100%);
+            justify-content: flex-start;
+            overflow: visible;
+            transform: translateX(clamp(-72px, -4vw, -28px));
         }
         .immersive-lyrics-panel {
-            width: min(880px, 52vw);
+            position: relative;
+            width: min(980px, 54vw);
             height: 100%;
-            overflow-y: auto;
+            overflow: visible;
             scrollbar-width: none;
-            padding: 0 110px 0 26px;
+            padding: 0;
+            transform-style: preserve-3d;
         }
         .immersive-lyrics-panel::-webkit-scrollbar {
             display: none;
         }
         .immersive-lyrics-inner {
-            display: flex;
-            flex-direction: column;
-            align-items: stretch;
-            gap: clamp(24px, 2.5vh, 38px);
+            position: absolute;
+            inset: 0;
+            transform-style: preserve-3d;
         }
         .immersive-lyric-line {
-            max-width: min(680px, 100%);
+            position: absolute;
+            left: 0;
+            top: 50%;
+            width: min(760px, 43vw);
             text-align: left;
             font-size: clamp(1.25rem, 1.78vw, 2.45rem);
-            line-height: 1.32;
+            line-height: 1.16;
             font-weight: 760;
             letter-spacing: 0;
             color: rgba(231, 238, 255, 0.33);
             text-shadow: 0 16px 44px rgba(0,0,0,0.46);
             opacity: var(--line-opacity, 0.18);
-            transform-origin: clamp(-460px, -26vw, -260px) 50%;
-            transform: translate3d(var(--line-x, 0), 0, 0) rotate(var(--line-rotation, 0deg)) scale(var(--line-scale, 0.94));
+            transform-origin: clamp(-720px, -40vw, -380px) 50%;
+            transform: translate3d(var(--line-x, 0), calc(-50% + var(--line-y, 0px)), var(--line-z, 0)) rotateZ(var(--line-rotation, 0deg)) rotateY(var(--line-tilt, 0deg)) scale(var(--line-scale, 0.94));
             transition: color 0.35s ease, opacity 0.35s ease, transform 0.35s ease, filter 0.35s ease;
+            filter: blur(var(--line-blur, 0px));
             will-change: transform, opacity;
-            overflow-wrap: anywhere;
+            overflow-wrap: break-word;
+            word-break: normal;
+            z-index: var(--line-z-index, 1);
+            pointer-events: none;
         }
         .immersive-lyric-line.is-active {
             color: rgba(248, 251, 255, 0.98);
             opacity: 1;
             font-size: clamp(1.45rem, 2.08vw, 2.85rem);
-            filter: drop-shadow(0 0 18px rgba(var(--accent-rgb), 0.34));
+            filter: blur(0) drop-shadow(0 0 18px rgba(var(--accent-rgb), 0.34));
             text-shadow: 0 0 22px rgba(var(--accent-rgb), 0.34), 0 18px 48px rgba(0,0,0,0.58);
         }
         .immersive-close {
@@ -582,15 +589,16 @@
                 margin: 0 auto;
             }
             .immersive-lyrics-wrap {
-                height: 42vh;
+                height: 54vh;
+                transform: none;
             }
             .immersive-lyrics-panel {
                 width: min(92vw, 620px);
-                padding: 0 42px;
             }
             .immersive-lyric-line {
-                transform-origin: clamp(-360px, -42vw, -180px) 50%;
+                transform-origin: clamp(-520px, -58vw, -220px) 50%;
                 font-size: clamp(1.1rem, 5vw, 1.7rem);
+                width: min(88vw, 620px);
             }
             .immersive-controls {
                 left: 20px;

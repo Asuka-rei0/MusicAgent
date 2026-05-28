@@ -11,13 +11,13 @@
     let currentCoverUrl = '';
     let currentQueueIndex = -1;
     let playbackStrategy = 'normal';
-    let isLiked = false;
+    let likedTracks = [];
     let messages = [];
     let tracks = [];
     let weeklyData = [];
     let platformData = [];
     let localPaths = [];
-    let settings = { theme: 'dark', autoPlay: true, desktopLyrics: false, colorFollowAlbum: true };
+    let settings = { theme: 'dark', autoPlay: true, desktopLyrics: false };
     let selectedPlaylist = null;
     let hasAutoScannedLocalPaths = false;
     let isScanningLocalPaths = false;
@@ -70,7 +70,20 @@
     let lastAssistantPlaybackContext = null;
     let messageSequence = 0;
     let shouldScrollLibraryTrackList = false;
+    let playbackClockBaseTime = 0;
+    let playbackClockBaseAt = 0;
+    let playbackUiFrameId = null;
+    let lastPlaybackUiPaintAt = 0;
+    let isProgressRequestPending = false;
+    let lastProgressRequestSentAt = 0;
+    let lastProgressRequestSource = '';
+    let lastDesktopLyricsPayloadKey = '';
     const pendingRequests = new Map();
+    const LIKED_TRACKS_STORAGE_KEY = 'musicagent.likedTracks.v1';
+    const PLAYBACK_UI_PAINT_INTERVAL_MS = 180;
+    const PROGRESS_POLL_INTERVAL_MS = 750;
+    const PROGRESS_REQUEST_TIMEOUT_MS = 1800;
+    const STALE_PROGRESS_TOLERANCE_SECONDS = 0.75;
     const aiSystemPrompt = [
         'You are an AI music assistant for MusicAgent.',
         'Help users discover music based on mood, preferences, and listening habits.',
@@ -92,18 +105,21 @@
         } else {
             window.addEventListener('message', handleWebMessage);
         }
-        window.addEventListener('beforeunload', () => savePlaybackState(currentTime, true));
+        window.addEventListener('beforeunload', () => savePlaybackState(getEstimatedCurrentTime(), true));
         window.addEventListener('keydown', handleGlobalKeyDown);
+        likedTracks = loadLikedTracks();
         loadInitialData();
         applyTheme();
         render();
         startProgressTimer();
+        startPlaybackUiTicker();
         window.addEventListener('resize', () => {
             if (currentView === 'ai-recommend') {
                 updateLyricsPadding();
             }
             if (isImmersivePlayerOpen) {
                 updateImmersiveLyricsPadding();
+                syncImmersiveLyricHighlight();
             }
         });
     }
@@ -169,6 +185,8 @@
             case 'getSettings':
                 settings = normalizeSettings(JSON.parse(data));
                 applyTheme();
+                syncDesktopLyricsEnabled();
+                sendDesktopLyricsUpdate(true);
                 render();
                 tryAutoRestorePlayback();
                 break;
@@ -179,6 +197,7 @@
             case 'getLyrics':
                 applyLyricsResponse(data);
                 renderLyricsPanel();
+                sendDesktopLyricsUpdate(true);
                 break;
             case 'play':
             case 'pause':
@@ -191,8 +210,9 @@
             case 'setVolume':
             case 'getAudioState':
             case 'getProgress':
-                applyAudioState(data);
+                applyAudioState(data, action);
                 renderPlayer();
+                sendDesktopLyricsUpdate();
                 break;
             case 'recordListeningTime':
                 sendToCSharp('getWeeklyData');
@@ -494,20 +514,48 @@
         return name;
     }
 
-    function applyAudioState(data) {
+    function applyAudioState(data, action = '') {
         const progressData = parseJsonData(data);
         if (!progressData || typeof progressData !== 'object') return;
+        if (action === 'getProgress') {
+            isProgressRequestPending = false;
+        }
 
         const previousSourceUri = currentSourceUri;
         const nextFilePath = progressData.filePath || currentFilePath;
         const statsPath = progressData.logicalSourceUri || progressData.trackId || progressData.sourceUri || nextFilePath;
-        updateListeningStats(statsPath, Number(progressData.currentTime ?? currentTime) || 0, Boolean(progressData.isPlaying));
+        const requestedProgressSource = lastProgressRequestSource;
+        if (action === 'getProgress'
+            && requestedProgressSource
+            && previousSourceUri
+            && normalizePathForCompare(statsPath) === normalizePathForCompare(requestedProgressSource)
+            && normalizePathForCompare(requestedProgressSource) !== normalizePathForCompare(previousSourceUri)) {
+            return;
+        }
+        const previousEstimatedTime = getEstimatedCurrentTime();
+        const incomingCurrentTime = toFiniteNumber(progressData.currentTime, currentTime);
+        const incomingDuration = toFiniteNumber(progressData.duration, duration);
+        const nextDuration = incomingDuration > 0 ? incomingDuration : duration;
+        const isSameSource = normalizePathForCompare(statsPath) === normalizePathForCompare(previousSourceUri);
+        const shouldKeepEstimatedTime = action === 'getProgress'
+            && isSameSource
+            && Boolean(progressData.isPlaying)
+            && incomingCurrentTime + STALE_PROGRESS_TOLERANCE_SECONDS < previousEstimatedTime;
+        const nextCurrentTime = shouldKeepEstimatedTime
+            ? previousEstimatedTime
+            : incomingCurrentTime;
 
-        progress = Number(progressData.progress ?? progress) || 0;
-        currentTime = Number(progressData.currentTime ?? currentTime) || 0;
-        duration = Number(progressData.duration ?? duration) || duration;
-        volume = Number(progressData.volume ?? volume) || volume;
+        updateListeningStats(statsPath, incomingCurrentTime, Boolean(progressData.isPlaying));
+
+        duration = nextDuration;
+        currentTime = clampPlaybackTime(nextCurrentTime);
+        progress = toFiniteNumber(
+            shouldKeepEstimatedTime && duration > 0 ? getPlaybackProgressPercent(currentTime) : progressData.progress,
+            getPlaybackProgressPercent(currentTime)
+        );
+        volume = toFiniteNumber(progressData.volume, volume);
         isPlaying = Boolean(progressData.isPlaying);
+        syncPlaybackClock(currentTime);
         currentFilePath = nextFilePath;
         currentSourceUri = statsPath;
         currentTrackTitle = progressData.title || getFileNameWithoutExtension(statsPath) || currentTrackTitle;
@@ -666,6 +714,11 @@
             return;
         }
 
+        if (selectedPlaylist?.isLikedPlaylist) {
+            selectedPlaylist = libraryPlaylists.find(playlist => playlist.isLikedPlaylist) || libraryPlaylists[0];
+            return;
+        }
+
         if (selectedPlaylist?.isAIRecommendation) {
             selectedPlaylist = libraryPlaylists.find(playlist => playlist.isAIRecommendation) || libraryPlaylists[0];
             return;
@@ -716,6 +769,7 @@
     }
 
     function getLibraryPlaylists() {
+        const likedPlaylist = getLikedPlaylist();
         const aiRecommendationPlaylist = getAIRecommendationPlaylist();
         const cloud = neteasePlaylists.map(playlist => ({
             id: `netease-${playlist.externalId}`,
@@ -740,6 +794,7 @@
             path: path.path
         }));
         return [
+            ...(likedPlaylist ? [likedPlaylist] : []),
             ...(aiRecommendationPlaylist ? [aiRecommendationPlaylist] : []),
             ...cloud,
             ...local
@@ -776,6 +831,9 @@
     }
 
     function getActiveTrackList() {
+        if (selectedPlaylist?.isLikedPlaylist) {
+            return likedTracks;
+        }
         if (selectedPlaylist?.isAIRecommendation) {
             return aiRecommendedTracks;
         }
@@ -897,6 +955,86 @@
         localStorage.setItem('musicagent.ai.config', JSON.stringify(aiConfig));
     }
 
+    function loadLikedTracks() {
+        try {
+            const saved = localStorage.getItem(LIKED_TRACKS_STORAGE_KEY);
+            const parsed = saved ? JSON.parse(saved) : [];
+            return uniqueTracks(Array.isArray(parsed) ? parsed : []);
+        } catch {
+            return [];
+        }
+    }
+
+    function saveLikedTracks() {
+        try {
+            localStorage.setItem(LIKED_TRACKS_STORAGE_KEY, JSON.stringify(likedTracks.map(toQueueTrack)));
+        } catch (error) {
+            console.warn('Failed to save liked tracks:', error);
+        }
+    }
+
+    function getTrackLikeKey(track) {
+        return normalizePathForCompare(getTrackSource(track));
+    }
+
+    function isTrackLiked(track) {
+        const key = getTrackLikeKey(track);
+        return Boolean(key) && likedTracks.some(item => getTrackLikeKey(item) === key);
+    }
+
+    function isCurrentTrackLiked() {
+        const snapshot = getNowPlayingSnapshot();
+        return Boolean(snapshot.track && isTrackLiked(snapshot.track));
+    }
+
+    function toggleCurrentTrackLike() {
+        const snapshot = getNowPlayingSnapshot();
+        if (!snapshot.track) return false;
+
+        const track = normalizeTrack(snapshot.track);
+        const key = getTrackLikeKey(track);
+        if (!key) return false;
+
+        const existingIndex = likedTracks.findIndex(item => getTrackLikeKey(item) === key);
+        if (existingIndex >= 0) {
+            likedTracks.splice(existingIndex, 1);
+        } else {
+            likedTracks.push(track);
+        }
+
+        likedTracks = uniqueTracks(likedTracks);
+        saveLikedTracks();
+
+        if (selectedPlaylist?.isLikedPlaylist && likedTracks.length === 0) {
+            selectedPlaylist = getLibraryPlaylists()[0] || null;
+        }
+
+        return true;
+    }
+
+    function getLikedPlaylist() {
+        if (likedTracks.length === 0) return null;
+
+        return {
+            id: 'liked-tracks',
+            isLocal: false,
+            isNetease: false,
+            isAIRecommendation: false,
+            isLikedPlaylist: true,
+            name: '我喜欢的音乐',
+            tracks: likedTracks.length,
+            duration: '收藏',
+            cover: getTrackCover(likedTracks[0]),
+            path: ''
+        };
+    }
+
+    function selectLikedPlaylist() {
+        const playlist = getLikedPlaylist();
+        if (playlist) selectedPlaylist = playlist;
+        return playlist;
+    }
+
     function isMeaningfulTrackTitle(value) {
         const normalized = String(value || '').trim().toLowerCase();
         return normalized && normalized !== 'unknown track' && normalized !== 'no track selected';
@@ -919,7 +1057,7 @@
         const normalizedSource = normalizePathForCompare(source);
         if (!normalizedSource) return null;
 
-        return [...aiRecommendedTracks, ...neteaseTracks, ...tracks]
+        return [...likedTracks, ...aiRecommendedTracks, ...neteaseTracks, ...tracks]
             .map(normalizeTrack)
             .find(track => {
                 const trackSource = getTrackSource(track);
@@ -931,6 +1069,7 @@
         const source = currentSourceUri || currentFilePath;
         const knownTrack = findTrackBySource(source);
         const queueTrack = findActiveQueueTrackBySource(source);
+        const displayTime = getEstimatedCurrentTime();
         const title = isMeaningfulTrackTitle(currentTrackTitle)
             ? currentTrackTitle
             : (knownTrack?.title || queueTrack?.title || (source ? getFileNameWithoutExtension(source) : ''));
@@ -961,7 +1100,7 @@
             title,
             artist,
             isPlaying,
-            currentTime,
+            currentTime: displayTime,
             duration,
             volume
         };
@@ -1135,6 +1274,7 @@
         loadedLyricsKey = sourceKey;
         lastActiveLyricIndex = -1;
         lyrics = [{ text: '正在加载歌词…', time: 0 }];
+        sendDesktopLyricsUpdate(true);
         sendToCSharp('getLyrics', JSON.stringify({ filePath: sourceKey }));
         if (currentView === 'ai-recommend') {
             renderLyricsPanel();
@@ -1219,6 +1359,11 @@
         return minutes * 60 + seconds + ms / 1000;
     }
 
+    function parseLrcOffsetSeconds(content) {
+        const offsetMatch = String(content || '').match(/^\s*\[offset\s*:\s*([+-]?\d+)\s*\]\s*$/im);
+        return offsetMatch ? Number(offsetMatch[1]) / 1000 : 0;
+    }
+
     function isLyricMetadata(text) {
         return /^(ti|ar|al|by|offset|id|ve|key|hash|sign|qq|total)\s*:/i.test(text)
             || /^(作词|作曲|编曲|制作人|制作|监制|录音|混音|母带|和声|吉他|贝斯|鼓|键盘|钢琴|弦乐|人声|配唱|出品|发行|词曲|原唱|翻唱|OP|SP|ISRC|企划|统筹|封面|设计)\s*[:：]/i.test(text);
@@ -1226,6 +1371,7 @@
 
     function parseLrc(content) {
         const timeTagPattern = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+        const offsetSeconds = parseLrcOffsetSeconds(content);
         const parsed = [];
 
         content.split(/\r?\n/).forEach(line => {
@@ -1237,7 +1383,7 @@
 
             tags.forEach(tag => {
                 parsed.push({
-                    time: parseLrcTimestamp(Number(tag[1]), Number(tag[2]), tag[3]),
+                    time: Math.max(0, parseLrcTimestamp(Number(tag[1]), Number(tag[2]), tag[3]) + offsetSeconds),
                     text
                 });
             });
@@ -1299,7 +1445,9 @@
     }
 
     function sendToCSharp(action, data = '') {
-        postToCSharp({ id: nextMessageId(), action, data });
+        const id = nextMessageId();
+        postToCSharp({ id, action, data });
+        return id;
     }
 
     function requestFromCSharp(action, data = '', timeoutMs = 30000) {
@@ -1340,7 +1488,7 @@
             theme: normalizeTheme(source.theme ?? source.Theme ?? settings.theme),
             autoPlay: Boolean(source.autoPlay ?? source.AutoPlay ?? settings.autoPlay),
             desktopLyrics: Boolean(source.desktopLyrics ?? source.DesktopLyrics ?? settings.desktopLyrics),
-            colorFollowAlbum: Boolean(source.colorFollowAlbum ?? source.ColorFollowAlbum ?? settings.colorFollowAlbum),
+            colorFollowAlbum: false,
             lastTrackPath: source.lastTrackPath ?? source.LastTrackPath ?? settings.lastTrackPath ?? '',
             lastPlaybackTime: Number(source.lastPlaybackTime ?? source.LastPlaybackTime ?? settings.lastPlaybackTime ?? 0) || 0,
             lastPlaybackQueue: parseSavedJson(source.lastPlaybackQueueJson ?? source.LastPlaybackQueueJson, []),
@@ -1422,6 +1570,15 @@
             return;
         }
 
+        if (savedPlaylist.type === 'liked') {
+            if (likedTracks.length === 0) {
+                likedTracks = uniqueTracks(savedQueue);
+                saveLikedTracks();
+            }
+            selectedPlaylist = getLikedPlaylist() || selectedPlaylist;
+            return;
+        }
+
         if (savedPlaylist.type === 'local' && savedPlaylist.path) {
             selectedPlaylist = getLibraryPlaylists().find(item =>
                 item.isLocal && item.path === savedPlaylist.path
@@ -1470,6 +1627,9 @@
         currentCoverUrl = getTrackCover(selected);
         currentQueueIndex = queueIndex;
         isPlaying = true;
+        currentTime = 0;
+        progress = 0;
+        syncPlaybackClock(0);
         requestLyricsForSource(currentSourceUri);
 
         sendToCSharp('setQueue', JSON.stringify({
@@ -1530,7 +1690,7 @@
 
     function maybeSavePlaybackState() {
         if (!isPlaying) return;
-        savePlaybackState(currentTime);
+        savePlaybackState(getEstimatedCurrentTime());
     }
 
     function reloadNeteaseExploreData() {
@@ -1553,10 +1713,100 @@
 
     function startProgressTimer() {
         setInterval(() => {
-            if (isPlaying) {
-                sendToCSharp('getProgress');
+            if (!isPlaying) return;
+
+            const now = Date.now();
+            if (isProgressRequestPending && now - lastProgressRequestSentAt < PROGRESS_REQUEST_TIMEOUT_MS) {
+                return;
             }
-        }, 1000);
+
+            isProgressRequestPending = true;
+            lastProgressRequestSentAt = now;
+            lastProgressRequestSource = currentSourceUri || currentFilePath;
+            sendToCSharp('getProgress');
+        }, PROGRESS_POLL_INTERVAL_MS);
+    }
+
+    function startPlaybackUiTicker() {
+        if (playbackUiFrameId !== null) return;
+
+        const tick = () => {
+            const now = getMonotonicNow();
+            if (isPlaying && now - lastPlaybackUiPaintAt >= PLAYBACK_UI_PAINT_INTERVAL_MS) {
+                commitEstimatedCurrentTime();
+                updatePlaybackProgressUi();
+                syncLyricHighlight();
+                syncImmersiveLyricHighlight();
+                sendDesktopLyricsUpdate();
+                lastPlaybackUiPaintAt = now;
+            }
+            playbackUiFrameId = requestAnimationFrame(tick);
+        };
+
+        playbackUiFrameId = requestAnimationFrame(tick);
+    }
+
+    function getMonotonicNow() {
+        return window.performance?.now ? window.performance.now() : Date.now();
+    }
+
+    function toFiniteNumber(value, fallback = 0) {
+        if (value === null || value === undefined || value === '') return fallback;
+        const number = Number(value);
+        return Number.isFinite(number) ? number : fallback;
+    }
+
+    function clampPlaybackTime(value) {
+        const nextTime = Math.max(0, toFiniteNumber(value, 0));
+        return duration > 0 ? Math.min(nextTime, duration) : nextTime;
+    }
+
+    function syncPlaybackClock(baseTime = currentTime) {
+        playbackClockBaseTime = clampPlaybackTime(baseTime);
+        playbackClockBaseAt = getMonotonicNow();
+    }
+
+    function getEstimatedCurrentTime() {
+        if (!isPlaying || playbackClockBaseAt <= 0) {
+            return clampPlaybackTime(currentTime);
+        }
+
+        const elapsedSeconds = Math.max(0, (getMonotonicNow() - playbackClockBaseAt) / 1000);
+        return clampPlaybackTime(playbackClockBaseTime + elapsedSeconds);
+    }
+
+    function getPlaybackProgressPercent(time = currentTime) {
+        if (duration <= 0) return Math.max(0, Math.min(100, progress || 0));
+        return Math.max(0, Math.min(100, (time / duration) * 100));
+    }
+
+    function commitEstimatedCurrentTime() {
+        currentTime = getEstimatedCurrentTime();
+        progress = getPlaybackProgressPercent(currentTime);
+        return currentTime;
+    }
+
+    function updatePlaybackProgressUi() {
+        const progressPercent = getPlaybackProgressPercent(currentTime);
+        const currentTimeText = formatTime(currentTime);
+        const currentTimeEl = document.getElementById('player-current-time');
+        const progressSlider = document.getElementById('progress-slider');
+        const immersiveCurrentTimeEl = document.getElementById('immersive-current-time');
+        const immersiveProgressSlider = document.getElementById('immersive-progress-slider');
+        const immersivePage = document.getElementById('immersive-player');
+
+        if (currentTimeEl) currentTimeEl.textContent = currentTimeText;
+        if (progressSlider && document.activeElement !== progressSlider) {
+            progressSlider.value = progressPercent;
+        }
+        if (immersiveCurrentTimeEl) immersiveCurrentTimeEl.textContent = currentTimeText;
+        if (immersiveProgressSlider && document.activeElement !== immersiveProgressSlider) {
+            immersiveProgressSlider.value = progressPercent;
+            immersiveProgressSlider.style.setProperty('--immersive-progress', `${progressPercent}%`);
+        }
+        if (immersivePage) {
+            immersivePage.style.setProperty('--immersive-progress', `${progressPercent}%`);
+        }
     }
 
     function formatTime(seconds) {
@@ -1584,6 +1834,9 @@
         currentTrackTitle = title;
         currentTrackArtist = artist;
         isPlaying = true;
+        currentTime = 0;
+        progress = 0;
+        syncPlaybackClock(0);
         rememberPlaybackQueue([{ id: filePath, title, artist, sourceUri: filePath, coverUrl: currentCoverUrl || '' }], 0, null);
         requestLyricsForSource(filePath);
         if (!options.skipSave) savePlaybackState(0, true);
@@ -1609,6 +1862,13 @@
     }
 
     function capturePlaylistContext() {
+        if (selectedPlaylist?.isLikedPlaylist) {
+            return {
+                type: 'liked',
+                name: selectedPlaylist.name || '我喜欢的音乐'
+            };
+        }
+
         if (selectedPlaylist?.isNetease) {
             return {
                 type: 'netease',
@@ -1683,6 +1943,9 @@
         currentCoverUrl = getTrackCover(selected);
         currentQueueIndex = index;
         isPlaying = true;
+        currentTime = 0;
+        progress = 0;
+        syncPlaybackClock(0);
         rememberPlaybackQueue(queue, startIndex >= 0 ? startIndex : index);
 
         requestLyricsForSource(sourceUri);
@@ -1750,6 +2013,9 @@
         currentCoverUrl = getTrackCover(selected);
         currentQueueIndex = queueIndex;
         isPlaying = true;
+        currentTime = 0;
+        progress = 0;
+        syncPlaybackClock(0);
         rememberPlaybackQueue(queue, queueIndex);
 
         requestLyricsForSource(currentSourceUri);
@@ -1795,7 +2061,11 @@
         currentTrackArtist = payload.artist || selected.artist;
         currentCoverUrl = payload.coverUrl || getTrackCover(selected);
         currentQueueIndex = Number.isFinite(Number(payload.currentIndex)) ? Number(payload.currentIndex) : queueIndex;
+        duration = toFiniteNumber(payload.duration, duration) || duration;
+        currentTime = clampPlaybackTime(toFiniteNumber(payload.currentTime, currentTime));
+        progress = getPlaybackProgressPercent(currentTime);
         isPlaying = Boolean(payload.isPlaying ?? true);
+        syncPlaybackClock(currentTime);
         requestLyricsForSource(selectedSource);
         if (!options.skipSave) savePlaybackState(0, true);
         renderPlayer();
@@ -2617,13 +2887,14 @@
 
     function getActiveLyricIndex() {
         if (!lyrics.length) return -1;
+        const lyricTime = getEstimatedCurrentTime();
 
         const index = lyrics.findIndex((lyric, i) => {
             const nextLyric = lyrics[i + 1];
-            return currentTime >= lyric.time && (!nextLyric || currentTime < nextLyric.time);
+            return lyricTime >= lyric.time && (!nextLyric || lyricTime < nextLyric.time);
         });
         if (index >= 0) return index;
-        if (currentTime >= lyrics[lyrics.length - 1].time) return lyrics.length - 1;
+        if (lyricTime >= lyrics[lyrics.length - 1].time) return lyrics.length - 1;
         return 0;
     }
 
@@ -2776,15 +3047,17 @@
         padBottom.style.height = `${half}px`;
     }
 
-    function scrollLyricLineIntoCenter(container, activeLine) {
+    function scrollLyricLineIntoCenter(container, activeLine, options = {}) {
+        const anchorRatio = Number.isFinite(Number(options.anchorRatio)) ? Number(options.anchorRatio) : 0.5;
+        const behavior = options.behavior || 'smooth';
         const lineRect = activeLine.getBoundingClientRect();
         const containerRect = container.getBoundingClientRect();
         const targetTop = container.scrollTop
             + (lineRect.top - containerRect.top)
-            - (container.clientHeight - lineRect.height) / 2;
+            - (container.clientHeight * anchorRatio - lineRect.height / 2);
         container.scrollTo({
             top: Math.max(0, targetTop),
-            behavior: 'smooth'
+            behavior
         });
     }
 
@@ -2823,7 +3096,45 @@
 
         if (indexChanged) {
             scrollLyricLineIntoCenter(container, activeLine);
+            sendDesktopLyricsUpdate();
         }
+    }
+
+    function syncDesktopLyricsEnabled() {
+        const enabled = Boolean(settings.desktopLyrics);
+        sendToCSharp('setDesktopLyricsEnabled', JSON.stringify({ enabled }));
+        if (!enabled) lastDesktopLyricsPayloadKey = '';
+    }
+
+    function getDesktopLyricsPayload() {
+        const snapshot = getNowPlayingSnapshot();
+        const activeLyricIndex = getActiveLyricIndex();
+        const activeLyric = activeLyricIndex >= 0 ? lyrics[activeLyricIndex] : lyrics[0];
+        const nextLyric = activeLyricIndex >= 0 ? lyrics[activeLyricIndex + 1] : null;
+        const progressText = snapshot.duration > 0
+            ? `${formatTime(snapshot.currentTime)} / ${formatTime(snapshot.duration)}`
+            : formatTime(snapshot.currentTime);
+
+        return {
+            enabled: Boolean(settings.desktopLyrics),
+            title: snapshot.track?.title || currentTrackTitle || '',
+            artist: snapshot.track?.artist || currentTrackArtist || '',
+            lyric: activeLyric?.text || (snapshot.hasTrack ? '暂无歌词' : ''),
+            nextLyric: nextLyric?.text || '',
+            isPlaying: Boolean(isPlaying),
+            progressText
+        };
+    }
+
+    function sendDesktopLyricsUpdate(force = false) {
+        const payload = getDesktopLyricsPayload();
+        if (!payload.enabled) return;
+
+        const payloadKey = JSON.stringify(payload);
+        if (!force && payloadKey === lastDesktopLyricsPayloadKey) return;
+
+        lastDesktopLyricsPayloadKey = payloadKey;
+        sendToCSharp('updateDesktopLyrics', JSON.stringify(payload));
     }
 
     function renderLyricsContent() {
@@ -2849,14 +3160,13 @@
     function getImmersiveDisplayState() {
         const snapshot = getNowPlayingSnapshot();
         const track = snapshot.track;
+        const displayTime = getEstimatedCurrentTime();
         const title = track?.title || (isMeaningfulTrackTitle(currentTrackTitle) ? currentTrackTitle : 'No track selected');
         const artist = track?.artist || (isMeaningfulArtist(currentTrackArtist) ? currentTrackArtist : 'Unknown Artist');
         const album = track?.album || (snapshot.sourceUri ? getParentFolderName(snapshot.sourceUri) : 'MusicAgent');
         const coverUrl = track?.coverUrl || currentCoverUrl || getDefaultCover();
         const sourceLabel = track?.isNetease ? '网易云音乐' : '本地曲库';
-        const progressPercent = duration > 0
-            ? Math.max(0, Math.min(100, (currentTime / duration) * 100))
-            : Math.max(0, Math.min(100, progress || 0));
+        const progressPercent = getPlaybackProgressPercent(displayTime);
 
         return {
             title,
@@ -2866,6 +3176,7 @@
             coverUrl,
             sourceLabel,
             progressPercent,
+            displayTime,
             durationText: duration > 0 ? formatTime(duration) : (track?.duration || '--:--')
         };
     }
@@ -2938,7 +3249,7 @@
                         ${renderImmersivePlayIcon()}
                     </button>
                     <div class="immersive-timeline">
-                        <span id="immersive-current-time">${formatTime(currentTime)}</span>
+                        <span id="immersive-current-time">${formatTime(state.displayTime)}</span>
                         <input type="range" id="immersive-progress-slider" class="immersive-progress-slider" min="0" max="100" value="${state.progressPercent}" style="--immersive-progress: ${state.progressPercent}%;" aria-label="播放进度">
                         <span id="immersive-duration-time">${escapeHtml(state.durationText)}</span>
                     </div>
@@ -2955,37 +3266,60 @@
 
     function renderImmersiveLyricsContent() {
         const activeLyricIndex = getActiveLyricIndex();
+        const displayActiveIndex = activeLyricIndex >= 0 ? activeLyricIndex : 0;
         const lineItems = lyrics.length > 0 ? lyrics : [{ text: 'No lyrics loaded', time: 0 }];
         return `
             <div id="immersive-lyrics-panel" class="immersive-lyrics-panel">
                 <div id="immersive-lyrics-scroll-inner" class="immersive-lyrics-inner">
-                    <div id="immersive-lyrics-pad-top" aria-hidden="true"></div>
                     ${lineItems.map((lyric, index) => {
-                        const offset = activeLyricIndex >= 0 ? index - activeLyricIndex : index;
+                        const offset = index - displayActiveIndex;
                         const lineStyle = getImmersiveLyricLineStyle(offset);
                         return `
-                            <div class="immersive-lyric-line ${index === activeLyricIndex ? 'is-active' : ''}" data-immersive-lyric-index="${index}" style="${lineStyle}">${escapeHtml(lyric.text)}</div>
+                            <div class="immersive-lyric-line ${index === displayActiveIndex ? 'is-active' : ''}" data-immersive-lyric-index="${index}" style="${lineStyle}">${escapeHtml(lyric.text)}</div>
                         `;
                     }).join('')}
-                    <div id="immersive-lyrics-pad-bottom" aria-hidden="true"></div>
                 </div>
             </div>
         `;
     }
 
     function getImmersiveLyricLineStyle(offset) {
-        const limited = Math.max(-7, Math.min(7, Number(offset) || 0));
-        const distance = Math.abs(limited);
-        const closeness = Math.max(0, 7 - distance);
-        const rotation = limited * 6.35;
-        const x = Math.pow(distance, 1.32) * 18;
-        const opacity = Math.min(0.7, 0.13 + closeness * 0.066).toFixed(3);
-        const scale = Math.min(1, 0.84 + closeness * 0.023).toFixed(3);
+        const rawOffset = Number(offset) || 0;
+        const sign = rawOffset < 0 ? -1 : rawOffset > 0 ? 1 : 0;
+        const distance = Math.abs(rawOffset);
+        const visibleDistance = Math.min(distance, 6);
+        const isHidden = distance > 5.75;
+        const viewportWidth = Math.max(320, window.innerWidth || 1280);
+        const viewportHeight = Math.max(520, window.innerHeight || 760);
+        const arcScale = Math.min(1, Math.max(0.52, viewportWidth / 900));
+        const rowStep = Math.min(112, Math.max(56, viewportHeight * (viewportWidth <= 900 ? 0.082 : 0.088)));
+        const y = sign * Math.pow(visibleDistance, 0.98) * rowStep;
+        const rotation = sign * Math.pow(visibleDistance, 0.95) * (6.35 + arcScale * 0.75);
+        const arcApex = 118 * arcScale;
+        const arcFalloff = Math.pow(visibleDistance, 1.22) * 36 * arcScale;
+        const x = arcApex - arcFalloff;
+        const z = -Math.pow(visibleDistance, 1.12) * 20 * arcScale;
+        const tilt = -sign * Math.pow(visibleDistance, 0.9) * (0.9 + arcScale * 0.35);
+        const opacity = isHidden
+            ? 0
+            : Math.max(0.06, 0.7 - Math.pow(distance, 1.08) * 0.118);
+        const blur = isHidden
+            ? 7
+            : Math.min(5.8, Math.pow(distance, 1.22) * 0.64);
+        const scale = distance === 0
+            ? 1.02
+            : Math.max(0.78, 0.96 - distance * 0.035);
+        const zIndex = Math.max(1, 30 - Math.round(distance * 2));
         return [
-            `--line-opacity:${opacity}`,
-            `--line-scale:${scale}`,
+            `--line-y:${y.toFixed(1)}px`,
+            `--line-opacity:${opacity.toFixed(3)}`,
+            `--line-blur:${blur.toFixed(2)}px`,
+            `--line-scale:${scale.toFixed(3)}`,
             `--line-rotation:${rotation.toFixed(2)}deg`,
-            `--line-x:${x.toFixed(1)}px`
+            `--line-x:${x.toFixed(1)}px`,
+            `--line-z:${z.toFixed(1)}px`,
+            `--line-tilt:${tilt.toFixed(2)}deg`,
+            `--line-z-index:${zIndex}`
         ].join(';') + ';';
     }
 
@@ -3016,6 +3350,7 @@
             progressSlider.addEventListener('input', (event) => {
                 progress = parseFloat(event.target.value);
                 currentTime = duration > 0 ? (progress / 100) * duration : currentTime;
+                syncPlaybackClock(currentTime);
                 sendToCSharp('setProgress', progress.toString());
                 savePlaybackState(currentTime, true);
                 updateImmersivePlayer();
@@ -3026,11 +3361,14 @@
 
     function togglePlaybackFromImmersive() {
         if (isPlaying) {
+            commitEstimatedCurrentTime();
             savePlaybackState(currentTime, true);
             isPlaying = false;
+            syncPlaybackClock(currentTime);
             sendToCSharp('pause');
         } else if (currentFilePath) {
             isPlaying = true;
+            syncPlaybackClock(currentTime);
             sendToCSharp('resume');
         } else if (getPlayableQueue().length > 0) {
             playTrackFromQueue(0);
@@ -3086,13 +3424,8 @@
 
     function updateImmersiveLyricsPadding() {
         const container = document.getElementById('immersive-lyrics-panel');
-        const padTop = document.getElementById('immersive-lyrics-pad-top');
-        const padBottom = document.getElementById('immersive-lyrics-pad-bottom');
-        if (!container || !padTop || !padBottom) return;
-
-        const half = Math.max(container.clientHeight / 2, 160);
-        padTop.style.height = `${half}px`;
-        padBottom.style.height = `${half}px`;
+        if (!container) return;
+        container.scrollTop = 0;
     }
 
     function syncImmersiveLyricHighlight() {
@@ -3100,14 +3433,14 @@
         if (!container) return;
 
         const activeLyricIndex = getActiveLyricIndex();
-        const indexChanged = activeLyricIndex !== lastImmersiveLyricIndex;
-        lastImmersiveLyricIndex = activeLyricIndex;
+        const displayActiveIndex = activeLyricIndex >= 0 ? activeLyricIndex : 0;
+        lastImmersiveLyricIndex = displayActiveIndex;
 
         document.querySelectorAll('[data-immersive-lyric-index]').forEach(line => {
             const lineIndex = Number(line.dataset.immersiveLyricIndex);
-            const isActive = lineIndex === activeLyricIndex;
+            const isActive = lineIndex === displayActiveIndex;
             line.classList.toggle('is-active', isActive);
-            const offset = activeLyricIndex >= 0 ? lineIndex - activeLyricIndex : lineIndex;
+            const offset = lineIndex - displayActiveIndex;
             getImmersiveLyricLineStyle(offset)
                 .split(';')
                 .filter(Boolean)
@@ -3116,12 +3449,6 @@
                     if (name && value) line.style.setProperty(name.trim(), value.trim());
                 });
         });
-
-        const scrollIndex = activeLyricIndex >= 0 ? activeLyricIndex : 0;
-        const activeLine = document.querySelector(`[data-immersive-lyric-index="${scrollIndex}"]`);
-        if (activeLine && indexChanged) {
-            scrollLyricLineIntoCenter(container, activeLine);
-        }
     }
 
     function updateImmersivePlayer() {
@@ -3155,7 +3482,7 @@
         }
 
         const currentTimeEl = document.getElementById('immersive-current-time');
-        if (currentTimeEl) currentTimeEl.textContent = formatTime(currentTime);
+        if (currentTimeEl) currentTimeEl.textContent = formatTime(state.displayTime);
 
         const durationTimeEl = document.getElementById('immersive-duration-time');
         if (durationTimeEl) durationTimeEl.textContent = state.durationText;
@@ -3188,43 +3515,16 @@
         const page = document.getElementById('immersive-player');
         if (!page) return;
 
-        const key = `${state.coverUrl}|${state.title}`;
-        const cachedPalette = immersivePaletteCache.get(key);
-        if (cachedPalette) {
-            applyImmersivePalette(page, cachedPalette);
-            currentImmersivePaletteKey = key;
-            return;
-        }
+        applyImmersivePalette(page, getDefaultImmersivePalette());
+        currentImmersivePaletteKey = '';
+    }
 
-        const fallbackPalette = getFallbackPalette(key);
-        applyImmersivePalette(page, fallbackPalette);
-        if (currentImmersivePaletteKey === key) return;
-        currentImmersivePaletteKey = key;
-
-        const image = new Image();
-        image.crossOrigin = 'anonymous';
-        image.onload = () => {
-            try {
-                const palette = extractPaletteFromImage(image) || fallbackPalette;
-                immersivePaletteCache.set(key, palette);
-                const activeState = getImmersiveDisplayState();
-                const activeKey = `${activeState.coverUrl}|${activeState.title}`;
-                const activePage = document.getElementById('immersive-player');
-                if (activeKey === key && activePage) {
-                    applyImmersivePalette(activePage, palette);
-                }
-            } catch {
-                immersivePaletteCache.set(key, fallbackPalette);
-                const activePage = document.getElementById('immersive-player');
-                if (activePage) applyImmersivePalette(activePage, fallbackPalette);
-            }
+    function getDefaultImmersivePalette() {
+        return {
+            accent: { r: 167, g: 139, b: 250 },
+            soft: { r: 236, g: 72, b: 153 },
+            shadow: { r: 8, g: 10, b: 22 }
         };
-        image.onerror = () => {
-            immersivePaletteCache.set(key, fallbackPalette);
-            const activePage = document.getElementById('immersive-player');
-            if (activePage) applyImmersivePalette(activePage, fallbackPalette);
-        };
-        image.src = state.coverUrl || getDefaultCover();
     }
 
     function extractPaletteFromImage(image) {
@@ -3437,9 +3737,6 @@
                 <div class="w-96 card flex flex-col min-h-0 overflow-hidden">
                     <h3 class="text-lg font-semibold mb-4 flex-shrink-0">Lyrics</h3>
                     ${renderLyricsContent()}
-                    <div class="mt-4 pt-4 border-t border-white/10 text-sm text-gray-500 text-center flex-shrink-0">
-                        Playing from <span class="text-purple-400">AI Recommendations</span>
-                    </div>
                 </div>
             </div>
         `;
@@ -3529,18 +3826,22 @@
         const hasLocalLibraries = localPaths.length > 0;
         const hasNeteasePlaylists = neteasePlaylists.length > 0;
         const hasAnyPlaylists = libraryPlaylists.length > 0;
-        const trackListTitle = selectedPlaylist?.isAIRecommendation
+        const trackListTitle = selectedPlaylist?.isLikedPlaylist
+            ? '我喜欢的音乐'
+            : (selectedPlaylist?.isAIRecommendation
             ? selectedPlaylist.name
             : (selectedPlaylist?.isNetease
             ? `${selectedPlaylist.name}（网易云）`
-            : (selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks'));
-        const visibleTracks = selectedPlaylist?.isAIRecommendation
+            : (selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks')));
+        const visibleTracks = selectedPlaylist?.isLikedPlaylist
+            ? likedTracks
+            : (selectedPlaylist?.isAIRecommendation
             ? aiRecommendedTracks
             : (selectedPlaylist?.isNetease
             ? neteaseTracks
             : (selectedPlaylist?.isLocal
                 ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
-                : tracks));
+                : tracks)));
         const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
             ? '姝ｅ湪璇诲彇宸叉湁姝屽崟姝屾洸...'
             : '鏆傛棤姝屾洸';
@@ -3565,12 +3866,16 @@
                     </div>
                     <div class="grid grid-cols-5 gap-4">
                         ${hasAnyPlaylists ? libraryPlaylists.map(playlist => {
-                            const playlistAttrs = playlist.isAIRecommendation
+                            const playlistAttrs = playlist.isLikedPlaylist
+                                ? 'data-liked-playlist="true"'
+                                : (playlist.isAIRecommendation
                                 ? 'data-ai-recommendation-playlist="true"'
-                                : (playlist.isNetease ? `data-netease-playlist-id="${playlist.externalId}"` : `data-local-playlist-index="${playlist.sourceIndex}"`);
-                            const badge = playlist.isAIRecommendation
+                                : (playlist.isNetease ? `data-netease-playlist-id="${playlist.externalId}"` : `data-local-playlist-index="${playlist.sourceIndex}"`));
+                            const badge = playlist.isLikedPlaylist
+                                ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">喜欢</span>'
+                                : (playlist.isAIRecommendation
                                 ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-purple-500/80">AI</span>'
-                                : (playlist.isNetease ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">网易</span>' : '');
+                                : (playlist.isNetease ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">网易</span>' : ''));
                             return `
                             <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" ${playlistAttrs}>
                                 <div class="aspect-square rounded-lg overflow-hidden mb-3 relative">
@@ -3657,16 +3962,6 @@
                             </div>
                             <label class="switch">
                                 <input type="checkbox" id="desktop-lyrics" ${settings.desktopLyrics ? 'checked' : ''}>
-                                <span class="slider"></span>
-                            </label>
-                        </div>
-                        <div class="flex items-center justify-between pt-4 border-t border-white/10">
-                            <div>
-                                <div class="font-medium">歌词颜色跟随专辑</div>
-                                <div class="text-sm text-gray-400">根据专辑封面自动调整歌词颜色</div>
-                            </div>
-                            <label class="switch">
-                                <input type="checkbox" id="color-follow" ${settings.colorFollowAlbum ? 'checked' : ''}>
                                 <span class="slider"></span>
                             </label>
                         </div>
@@ -3764,6 +4059,9 @@
         `;
     }
     function renderPlayerBar() {
+        const displayTime = getEstimatedCurrentTime();
+        const displayProgress = getPlaybackProgressPercent(displayTime);
+        const currentLiked = isCurrentTrackLiked();
         return `
             <div class="player-bar px-6 flex items-center gap-6 text-white">
                 <div class="flex items-center gap-4 w-80">
@@ -3774,8 +4072,8 @@
                         <div class="font-medium truncate">${currentTrackTitle || 'No track selected'}</div>
                         <div class="text-sm text-gray-400 truncate">${currentTrackArtist || 'Unknown Artist'}</div>
                     </div>
-                    <button id="like-btn" class="p-2 hover:bg-white/5 rounded-full transition-colors">
-                        <svg class="w-5 h-5 ${isLiked ? 'fill-red-500 text-red-500' : 'text-gray-400'}" fill="${isLiked ? 'currentColor' : 'none'}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+                    <button id="like-btn" class="p-2 hover:bg-white/5 rounded-full transition-colors" title="${currentLiked ? '取消喜欢' : '添加到我喜欢的音乐'}" aria-label="${currentLiked ? '取消喜欢' : '添加到我喜欢的音乐'}">
+                        <svg class="w-5 h-5 ${currentLiked ? 'fill-red-500 text-red-500' : 'text-gray-400'}" fill="${currentLiked ? 'currentColor' : 'none'}" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
                     </button>
                 </div>
                 <div class="flex-1 flex flex-col items-center gap-2">
@@ -3794,9 +4092,9 @@
                         </button>
                     </div>
                     <div class="w-full max-w-2xl flex items-center gap-3">
-                        <span class="text-xs text-gray-400 w-10 text-right">${formatTime(currentTime)}</span>
-                        <input type="range" id="progress-slider" min="0" max="100" value="${progress}" class="flex-1">
-                        <span class="text-xs text-gray-400 w-10">${formatTime(duration)}</span>
+                        <span id="player-current-time" class="text-xs text-gray-400 w-10 text-right">${formatTime(displayTime)}</span>
+                        <input type="range" id="progress-slider" min="0" max="100" value="${displayProgress}" class="flex-1">
+                        <span id="player-duration-time" class="text-xs text-gray-400 w-10">${formatTime(duration)}</span>
                     </div>
                 </div>
                 <div class="flex items-center gap-4 w-80 justify-end">
@@ -3838,6 +4136,16 @@
                 if (e.key === 'Enter') sendAIMessage();
             });
         }
+
+        document.querySelectorAll('[data-liked-playlist]').forEach(el => {
+            el.addEventListener('click', () => {
+                const playlist = selectLikedPlaylist();
+                if (!playlist) return;
+
+                render();
+                scrollLibraryTrackListIntoView();
+            });
+        });
 
         document.querySelectorAll('[data-ai-recommendation-playlist]').forEach(el => {
             el.addEventListener('click', () => {
@@ -3963,14 +4271,8 @@
             desktopLyrics.addEventListener('change', () => {
                 settings.desktopLyrics = desktopLyrics.checked;
                 sendToCSharp('saveSettings', JSON.stringify(settings));
-            });
-        }
-
-        const colorFollow = document.getElementById('color-follow');
-        if (colorFollow) {
-            colorFollow.addEventListener('change', () => {
-                settings.colorFollowAlbum = colorFollow.checked;
-                sendToCSharp('saveSettings', JSON.stringify(settings));
+                syncDesktopLyricsEnabled();
+                sendDesktopLyricsUpdate(true);
             });
         }
 
@@ -4041,11 +4343,14 @@
         if (playPauseBtn) {
             playPauseBtn.addEventListener('click', () => {
                 if (isPlaying) {
+                    commitEstimatedCurrentTime();
                     savePlaybackState(currentTime, true);
                     isPlaying = false;
+                    syncPlaybackClock(currentTime);
                     sendToCSharp('pause');
                 } else if (currentFilePath) {
                     isPlaying = true;
+                    syncPlaybackClock(currentTime);
                     sendToCSharp('resume');
                 } else if (getPlayableQueue().length > 0) {
                     playTrackFromQueue(0);
@@ -4061,6 +4366,7 @@
         const previousBtn = document.getElementById('previous-btn');
         if (previousBtn) {
             previousBtn.addEventListener('click', () => {
+                commitEstimatedCurrentTime();
                 savePlaybackState(currentTime, true);
                 sendToCSharp('previous');
             });
@@ -4069,6 +4375,7 @@
         const nextBtn = document.getElementById('next-btn');
         if (nextBtn) {
             nextBtn.addEventListener('click', () => {
+                commitEstimatedCurrentTime();
                 savePlaybackState(currentTime, true);
                 sendToCSharp('next');
             });
@@ -4083,7 +4390,8 @@
         if (progressSlider) {
             progressSlider.addEventListener('input', (e) => {
                 progress = parseFloat(e.target.value);
-                currentTime = (progress / 100) * duration;
+                currentTime = duration > 0 ? (progress / 100) * duration : currentTime;
+                syncPlaybackClock(currentTime);
                 sendToCSharp('setProgress', progress.toString());
                 savePlaybackState(currentTime, true);
             });
@@ -4100,8 +4408,13 @@
         const likeBtn = document.getElementById('like-btn');
         if (likeBtn) {
             likeBtn.addEventListener('click', () => {
-                isLiked = !isLiked;
-                renderPlayer();
+                if (!toggleCurrentTrackLike()) return;
+
+                if (currentView === 'library') {
+                    render();
+                } else {
+                    renderPlayer();
+                }
             });
         }
     }

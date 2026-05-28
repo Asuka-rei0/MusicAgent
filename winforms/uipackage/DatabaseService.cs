@@ -63,7 +63,7 @@ public class DatabaseService
                 Theme = "dark",
                 AutoPlay = true,
                 DesktopLyrics = false,
-                ColorFollowAlbum = true
+                ColorFollowAlbum = false
             });
         }
 
@@ -464,7 +464,7 @@ public class AppSettings
     public string Theme { get; set; } = "dark";
     public bool AutoPlay { get; set; } = true;
     public bool DesktopLyrics { get; set; } = false;
-    public bool ColorFollowAlbum { get; set; } = true;
+    public bool ColorFollowAlbum { get; set; } = false;
     public string LastTrackPath { get; set; } = string.Empty;
     public double LastPlaybackTime { get; set; }
     public string LastPlaybackQueueJson { get; set; } = string.Empty;

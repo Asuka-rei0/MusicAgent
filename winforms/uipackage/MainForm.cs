@@ -17,6 +17,9 @@ public class MainForm : Form
     private FormWindowState previousWindowState;
     private Rectangle previousBounds;
     private bool previousTopMost;
+    private DesktopLyricsForm? desktopLyricsForm;
+    private DesktopLyricsPayload lastDesktopLyricsPayload = new();
+    private bool isDesktopLyricsClosedByUser;
 
     public MainForm()
     {
@@ -25,6 +28,13 @@ public class MainForm : Form
         this.StartPosition = FormStartPosition.CenterScreen;
         InitializeWebView();
         InitializeServices();
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        desktopLyricsForm?.Close();
+        desktopLyricsForm?.Dispose();
+        base.OnFormClosed(e);
     }
 
     private void InitializeWebView()
@@ -132,8 +142,114 @@ public class MainForm : Form
             "getNeteaseMoodTracks" => await neteaseService.GetMoodTracksAsync(request.Data, id),
             "enterImmersivePlayer" => SetImmersiveFullscreen(true, id),
             "exitImmersivePlayer" => SetImmersiveFullscreen(false, id),
+            "setDesktopLyricsEnabled" => SetDesktopLyricsEnabled(request.Data, id),
+            "updateDesktopLyrics" => UpdateDesktopLyrics(request.Data, id),
             _ => new WebMessageResponse { Id = id, Action = request.Action, Data = "Unknown action" }
         };
+    }
+
+    private WebMessageResponse SetDesktopLyricsEnabled(string data, string id)
+    {
+        try
+        {
+            var payload = ReadDesktopLyricsPayload(data);
+            var enabled = payload.Enabled;
+            lastDesktopLyricsPayload.Enabled = enabled;
+            isDesktopLyricsClosedByUser = false;
+
+            if (enabled)
+            {
+                try
+                {
+                    var lyricsForm = EnsureDesktopLyricsForm();
+                    lyricsForm.UpdateLyrics(lastDesktopLyricsPayload);
+                    lyricsForm.ShowLyrics();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"桌面歌词显示失败: {ex.Message}");
+                    return new WebMessageResponse { Id = id, Action = "setDesktopLyricsEnabled", Data = $"显示桌面歌词时出错: {ex.Message}" };
+                }
+            }
+            else
+            {
+                desktopLyricsForm?.Hide();
+            }
+
+            return new WebMessageResponse { Id = id, Action = "setDesktopLyricsEnabled", Data = "OK" };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"设置桌面歌词状态失败: {ex.Message}");
+            return new WebMessageResponse { Id = id, Action = "setDesktopLyricsEnabled", Data = $"操作失败: {ex.Message}" };
+        }
+    }
+
+    private WebMessageResponse UpdateDesktopLyrics(string data, string id)
+    {
+        try
+        {
+            var payload = ReadDesktopLyricsPayload(data);
+            lastDesktopLyricsPayload = payload;
+
+            if (payload.Enabled && !isDesktopLyricsClosedByUser)
+            {
+                try
+                {
+                    var lyricsForm = EnsureDesktopLyricsForm();
+                    lyricsForm.UpdateLyrics(payload);
+                    lyricsForm.ShowLyrics();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"更新桌面歌词失败: {ex.Message}");
+                    return new WebMessageResponse { Id = id, Action = "updateDesktopLyrics", Data = $"更新歌词时出错: {ex.Message}" };
+                }
+            }
+            else
+            {
+                desktopLyricsForm?.Hide();
+            }
+
+            return new WebMessageResponse { Id = id, Action = "updateDesktopLyrics", Data = "OK" };
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"更新桌面歌词状态失败: {ex.Message}");
+            return new WebMessageResponse { Id = id, Action = "updateDesktopLyrics", Data = $"操作失败: {ex.Message}" };
+        }
+    }
+
+    private DesktopLyricsPayload ReadDesktopLyricsPayload(string data)
+    {
+        if (string.IsNullOrWhiteSpace(data))
+        {
+            return new DesktopLyricsPayload();
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<DesktopLyricsPayload>(data, jsonOptions) ?? new DesktopLyricsPayload();
+        }
+        catch
+        {
+            return new DesktopLyricsPayload();
+        }
+    }
+
+    private DesktopLyricsForm EnsureDesktopLyricsForm()
+    {
+        if (desktopLyricsForm == null || desktopLyricsForm.IsDisposed)
+        {
+            desktopLyricsForm = new DesktopLyricsForm(this);
+            desktopLyricsForm.CloseRequested += (_, _) =>
+            {
+                isDesktopLyricsClosedByUser = true;
+                desktopLyricsForm?.Hide();
+            };
+        }
+
+        return desktopLyricsForm;
     }
 
     private WebMessageResponse SetImmersiveFullscreen(bool enabled, string id)
