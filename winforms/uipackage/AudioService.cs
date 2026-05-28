@@ -1,6 +1,7 @@
 using AAudioCore.Models;
 using AAudioCore.Services;
 using AAudioCore.Strategies;
+using System.Globalization;
 using System.Text.Json;
 
 namespace MusicAgentWinForms;
@@ -215,7 +216,7 @@ public class AudioService
     {
         try
         {
-            if (float.TryParse(data, out float volume))
+            if (TryReadVolumePercent(data, out var volume))
             {
                 audioCore.ExecuteCommand(new PlayCommand
                 {
@@ -231,6 +232,95 @@ public class AudioService
         {
             return CreateStateResponse("setVolume", ex.Message);
         }
+    }
+
+    private static bool TryReadVolumePercent(string data, out float volume)
+    {
+        volume = 0;
+        var text = (data ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            if (root.ValueKind is JsonValueKind.Number or JsonValueKind.String)
+            {
+                return TryReadVolumeValue(root, normalized: false, out volume);
+            }
+
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in root.EnumerateObject())
+                {
+                    if (property.Name.Equals("ratio", StringComparison.OrdinalIgnoreCase) ||
+                        property.Name.Equals("normalized", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (TryReadVolumeValue(property.Value, normalized: true, out volume))
+                        {
+                            return true;
+                        }
+                    }
+
+                    if (property.Name.Equals("volume", StringComparison.OrdinalIgnoreCase) ||
+                        property.Name.Equals("percent", StringComparison.OrdinalIgnoreCase) ||
+                        property.Name.Equals("value", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var isVolumeProperty = property.Name.Equals("volume", StringComparison.OrdinalIgnoreCase);
+                        if (TryReadVolumeValue(property.Value, normalized: isVolumeProperty, out volume))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Fall back to plain text parsing below.
+        }
+
+        return TryParseVolumeText(text, out volume);
+    }
+
+    private static bool TryReadVolumeValue(JsonElement value, bool normalized, out float volume)
+    {
+        volume = 0;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetSingle(out var numericValue))
+        {
+            volume = normalized && numericValue is >= 0f and <= 1f ? numericValue * 100f : numericValue;
+            return true;
+        }
+
+        if (value.ValueKind == JsonValueKind.String)
+        {
+            if (!TryParseVolumeText(value.GetString() ?? string.Empty, out var textValue))
+            {
+                return false;
+            }
+
+            volume = normalized && textValue is >= 0f and <= 1f ? textValue * 100f : textValue;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseVolumeText(string text, out float volume)
+    {
+        var cleaned = (text ?? string.Empty)
+            .Trim()
+            .Trim('"')
+            .Trim()
+            .Replace("\uFF05", "")
+            .TrimEnd('%')
+            .Trim();
+
+        return float.TryParse(cleaned, NumberStyles.Float, CultureInfo.InvariantCulture, out volume) ||
+            float.TryParse(cleaned, NumberStyles.Float, CultureInfo.CurrentCulture, out volume);
     }
 
     public WebMessageResponse SetProgress(string data)

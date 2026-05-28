@@ -29,6 +29,7 @@
     let immersiveControlsHideTimer = null;
     let currentImmersivePaletteKey = '';
     let immersivePaletteCache = new Map();
+    let isVolumeSliderDragging = false;
     let listeningBufferSeconds = 0;
     let lastProgressFilePath = '';
     let lastProgressTime = 0;
@@ -80,6 +81,8 @@
     let lastDesktopLyricsPayloadKey = '';
     const pendingRequests = new Map();
     const LIKED_TRACKS_STORAGE_KEY = 'musicagent.likedTracks.v1';
+    const AI_RECOMMENDATIONS_STORAGE_KEY = 'musicagent.aiRecommendations.v1';
+    const AI_PLAYLIST_MAX_TRACKS = 20;
     const PLAYBACK_UI_PAINT_INTERVAL_MS = 180;
     const PROGRESS_POLL_INTERVAL_MS = 750;
     const PROGRESS_REQUEST_TIMEOUT_MS = 1800;
@@ -108,6 +111,7 @@
         window.addEventListener('beforeunload', () => savePlaybackState(getEstimatedCurrentTime(), true));
         window.addEventListener('keydown', handleGlobalKeyDown);
         likedTracks = loadLikedTracks();
+        loadAIRecommendations();
         loadInitialData();
         applyTheme();
         render();
@@ -207,12 +211,38 @@
             case 'setQueue':
             case 'setPlaybackStrategy':
             case 'setProgress':
-            case 'setVolume':
             case 'getAudioState':
             case 'getProgress':
                 applyAudioState(data, action);
                 renderPlayer();
                 sendDesktopLyricsUpdate();
+                break;
+            case 'setVolume':
+                applyAudioState(data, action);
+                if (isVolumeSliderDragging) {
+                    updateVolumeSliderUi();
+                } else {
+                    renderPlayer();
+                }
+                sendDesktopLyricsUpdate();
+                break;
+            case 'setDesktopLyricsEnabled':
+                if (typeof data === 'string' && data && data !== 'OK') {
+                    alert(`桌面歌词打开失败：${data}`);
+                }
+                break;
+            case 'updateDesktopLyrics':
+                if (typeof data === 'string' && data && data !== 'OK') {
+                    console.warn('Desktop lyrics update failed:', data);
+                }
+                break;
+            case 'desktopLyricsClosed':
+                settings.desktopLyrics = false;
+                lastDesktopLyricsPayloadKey = '';
+                sendToCSharp('saveSettings', JSON.stringify(settings));
+                if (currentView === 'settings') {
+                    renderPreservingMainScroll();
+                }
                 break;
             case 'recordListeningTime':
                 sendToCSharp('getWeeklyData');
@@ -553,7 +583,7 @@
             shouldKeepEstimatedTime && duration > 0 ? getPlaybackProgressPercent(currentTime) : progressData.progress,
             getPlaybackProgressPercent(currentTime)
         );
-        volume = toFiniteNumber(progressData.volume, volume);
+        volume = clampVolume(toFiniteNumber(progressData.volume, volume));
         isPlaying = Boolean(progressData.isPlaying);
         syncPlaybackClock(currentTime);
         currentFilePath = nextFilePath;
@@ -736,7 +766,7 @@
     }
 
     function getAIRecommendationPlaylist() {
-        const recommendationTracks = uniqueTracks(aiRecommendedTracks).slice(0, 5);
+        const recommendationTracks = uniqueTracks(aiRecommendedTracks).slice(0, AI_PLAYLIST_MAX_TRACKS);
         if (recommendationTracks.length === 0) return null;
 
         return {
@@ -759,13 +789,25 @@
     }
 
     function setAIRecommendations(trackList, playlistName = 'AI Recommendations') {
-        aiRecommendedTracks = uniqueTracks(trackList).slice(0, 5);
+        aiRecommendedTracks = uniqueRecommendationTracks(trackList).slice(0, AI_PLAYLIST_MAX_TRACKS);
         aiRecommendationPlaylistName = playlistName || 'AI Recommendations';
+        saveAIRecommendations();
         const playlist = selectAIRecommendationPlaylist();
         if (!playlist && selectedPlaylist?.isAIRecommendation) {
             selectedPlaylist = getLibraryPlaylists()[0] || null;
         }
         return playlist;
+    }
+
+    function clearAIRecommendations() {
+        const deletedName = aiRecommendationPlaylistName || 'AI Recommendations';
+        aiRecommendedTracks = [];
+        aiRecommendationPlaylistName = 'AI Recommendations';
+        saveAIRecommendations();
+        if (selectedPlaylist?.isAIRecommendation) {
+            selectedPlaylist = getLibraryPlaylists()[0] || null;
+        }
+        return deletedName;
     }
 
     function getLibraryPlaylists() {
@@ -970,6 +1012,36 @@
             localStorage.setItem(LIKED_TRACKS_STORAGE_KEY, JSON.stringify(likedTracks.map(toQueueTrack)));
         } catch (error) {
             console.warn('Failed to save liked tracks:', error);
+        }
+    }
+
+    function loadAIRecommendations() {
+        try {
+            const saved = localStorage.getItem(AI_RECOMMENDATIONS_STORAGE_KEY);
+            if (!saved) return;
+
+            const payload = JSON.parse(saved);
+            const savedTracks = Array.isArray(payload?.tracks) ? payload.tracks : [];
+            aiRecommendedTracks = uniqueRecommendationTracks(savedTracks).slice(0, AI_PLAYLIST_MAX_TRACKS);
+            aiRecommendationPlaylistName = payload?.name || aiRecommendationPlaylistName;
+        } catch (error) {
+            console.warn('Failed to load AI recommendations:', error);
+        }
+    }
+
+    function saveAIRecommendations() {
+        try {
+            if (aiRecommendedTracks.length === 0) {
+                localStorage.removeItem(AI_RECOMMENDATIONS_STORAGE_KEY);
+                return;
+            }
+
+            localStorage.setItem(AI_RECOMMENDATIONS_STORAGE_KEY, JSON.stringify({
+                name: aiRecommendationPlaylistName || 'AI Recommendations',
+                tracks: aiRecommendedTracks.map(toQueueTrack)
+            }));
+        } catch (error) {
+            console.warn('Failed to save AI recommendations:', error);
         }
     }
 
@@ -1222,7 +1294,21 @@
             classical: ['classical', 'piano'],
             electronic: ['electronic', 'dance'],
             'lo-fi': ['lo-fi', 'chill'],
-            lofi: ['lo-fi', 'chill']
+            lofi: ['lo-fi', 'chill'],
+            跑步: ['rock', 'dance', 'fast'],
+            运动: ['rock', 'dance', 'fast'],
+            健身: ['rock', 'dance', 'fast'],
+            学习: ['instrumental', 'ambient', 'piano'],
+            专注: ['instrumental', 'ambient', 'piano'],
+            睡前: ['slow', 'ambient', 'soft'],
+            助眠: ['slow', 'ambient', 'soft'],
+            放松: ['chill', 'soft', 'acoustic'],
+            治愈: ['chill', 'soft', 'acoustic'],
+            开心: ['pop', 'upbeat', 'bright'],
+            快乐: ['pop', 'upbeat', 'bright'],
+            伤感: ['slow', 'acoustic', 'piano'],
+            难过: ['slow', 'acoustic', 'piano'],
+            派对: ['dance', 'pop', 'upbeat']
         };
 
         const keywords = [];
@@ -1287,7 +1373,11 @@
     function applyLyricsResponse(data) {
         const lyricData = parseJsonData(data);
         const activeKey = currentSourceUri || currentFilePath;
-        if (lyricData?.filePath && lyricData.filePath !== activeKey) {
+        const responseKey = lyricData?.filePath || '';
+        const acceptedKeys = [activeKey, currentSourceUri, currentFilePath, loadedLyricsKey]
+            .filter(Boolean)
+            .map(normalizePathForCompare);
+        if (responseKey && !acceptedKeys.includes(normalizePathForCompare(responseKey))) {
             return;
         }
 
@@ -1561,12 +1651,14 @@
         }
 
         if (savedPlaylist.type === 'ai') {
+            aiRecommendationPlaylistName = savedPlaylist.name || aiRecommendationPlaylistName;
+            aiRecommendedTracks = uniqueRecommendationTracks(savedQueue).slice(0, AI_PLAYLIST_MAX_TRACKS);
+            saveAIRecommendations();
             selectedPlaylist = {
                 id: 'ai-recommendations',
-                name: savedPlaylist.name || aiRecommendationPlaylistName,
+                name: aiRecommendationPlaylistName,
                 isAIRecommendation: true
             };
-            aiRecommendedTracks = savedQueue.map(normalizeTrack);
             return;
         }
 
@@ -1989,6 +2081,22 @@
             seen.add(key);
             result.push(normalized);
         });
+        return result;
+    }
+
+    function uniqueRecommendationTracks(trackList) {
+        const sourceUniqueTracks = uniqueTracks(trackList);
+        const seenTitles = new Set();
+        const result = [];
+
+        sourceUniqueTracks.forEach(track => {
+            const titleKey = normalizeSearchText(`${track.title || ''}${track.artist || ''}`);
+            if (titleKey && seenTitles.has(titleKey)) return;
+
+            if (titleKey) seenTitles.add(titleKey);
+            result.push(track);
+        });
+
         return result;
     }
 
@@ -2539,7 +2647,7 @@
                 throw new Error('没有找到可播放的本地歌曲或网易云推荐歌曲，请先扫描曲库或启动 NeteaseCloudMusicApi。');
             }
 
-            aiRecommendedTracks = recommendedTracks;
+            setAIRecommendations(recommendedTracks, 'AI推荐：Start Listening');
             const playback = await playTrackCollectionConfirmed(recommendedTracks, 0, { detachPlaylist: true });
             setLastAssistantPlaybackContext(playback.track, '根据 Music Library 听歌数据和网易云候选生成推荐', 'Start Listening');
             render();
@@ -2634,27 +2742,542 @@
         return /(推荐|心情|氛围|适合|来点|来首|歌单|音乐|听什么|recommend|music|mood)/i.test(String(content || ''));
     }
 
+    function cleanMusicEntity(value) {
+        const cleaned = String(value || '')
+            .replace(/[《》「」“”"'`]/g, '')
+            .replace(/^(?:(?:帮我|请|给我|麻烦|能不能|可以|推荐|找|搜索|搜|来点|来些|来几首|来首|放|播放|听|想听|一些|几首|几支|一点|点|些|一个|一份|适合|关于|有关|by|from)\s*)+/gi, '')
+            .replace(/\s*(?:的|歌|歌曲|音乐|作品|曲子|歌单|playlist|并|然后|顺便|创建|建立|生成|新建|做|整理|推荐|播放|吧|谢谢).*$/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!cleaned || /^(?:歌|歌曲|音乐|作品|曲子|歌单|playlist|推荐|一些|几首|当前|这首|这些|那种|类似)$/i.test(cleaned)) {
+            return '';
+        }
+
+        return cleaned.slice(0, 40);
+    }
+
+    function extractArtistRecommendationQuery(content) {
+        const raw = String(content || '').trim();
+        if (!raw) return '';
+
+        const patterns = [
+            /(?:推荐|找|搜索|搜|来点|来些|来几首|给我|帮我|请|想听)\s*(?:一些|几首|几支|点|些)?\s*([^，。,.!?！？\n]{1,48}?)(?:的)?(?:歌|歌曲|音乐|作品|曲子)(?:\s|[，。,.!?！？]|$)/i,
+            /(?:推荐|创建|建立|生成|新建|做|整理)\s*(?:一些|一个|一份)?\s*([^，。,.!?！？\n]{1,48}?)的(?:歌单|playlist)/i,
+            /([^，。,.!?！？\n]{1,48}?)(?:的)?(?:歌|歌曲|音乐|作品|曲子).*(?:推荐|歌单|playlist|创建|建立|生成|新建|做|整理)/i,
+            /(?:artist|singer|歌手)\s*[:：]?\s*([^，。,.!?！？\n]{1,48})/i
+        ];
+
+        for (const pattern of patterns) {
+            const match = raw.match(pattern);
+            const entity = cleanMusicEntity(match?.[1]);
+            if (entity) return entity;
+        }
+
+        return '';
+    }
+
+    function trackMatchesArtistQuery(track, artistQuery) {
+        const needle = normalizeSearchText(artistQuery);
+        if (!needle) return false;
+
+        const artistText = normalizeSearchText(track?.artist || '');
+        const titleArtistText = normalizeSearchText(`${track?.title || ''}${track?.artist || ''}`);
+        return artistText.includes(needle) || titleArtistText.includes(needle);
+    }
+
+    async function buildArtistPlaylistCandidates(artistQuery) {
+        const cleanQuery = cleanMusicEntity(artistQuery);
+        if (!cleanQuery) return [];
+
+        const localMatches = searchLocalTracks(cleanQuery, AI_PLAYLIST_MAX_TRACKS);
+        let neteaseMatches = [];
+        try {
+            neteaseMatches = await searchNeteaseTracks(cleanQuery, AI_PLAYLIST_MAX_TRACKS * 2);
+        } catch (error) {
+            console.warn(`NetEase artist search failed for "${cleanQuery}":`, error);
+        }
+
+        const candidates = uniqueRecommendationTracks([...neteaseMatches, ...localMatches]);
+        const artistMatches = candidates.filter(track => trackMatchesArtistQuery(track, cleanQuery));
+        return (artistMatches.length > 0 ? artistMatches : candidates).slice(0, AI_PLAYLIST_MAX_TRACKS);
+    }
+
+    function isPlaylistCreationRequest(content) {
+        const text = String(content || '').trim().toLowerCase();
+        if (!text) return false;
+        if (/(删除|删掉|移除|清空|不要|取消|delete|remove|clear).*(歌单|playlist|列表)/i.test(text) ||
+            /(歌单|playlist|列表).*(删除|删掉|移除|清空|不要|取消|delete|remove|clear)/i.test(text)) {
+            return false;
+        }
+        return (
+            /(创建|建立|生成|新建|做|整理|来个|来一份|推荐).*(歌单|playlist)/i.test(text) ||
+            /(歌单|playlist).*(创建|建立|生成|新建|做|整理|推荐)/i.test(text) ||
+            /(把|用).*(推荐|这些|这几首|当前|现在|正在播放).*(歌单|playlist)/i.test(text)
+        );
+    }
+
+    function extractPlaylistName(content) {
+        const text = String(content || '').trim();
+        const patterns = [
+            /(?:歌单\s*[，,]?\s*(?:叫|名为|名字(?:叫|是)?|命名为)|叫做|名叫|名称是|命名为|named|called)\s*[《「"']?([^》」"'\n，。,.!?！？的]+)[》」"']?/i,
+            /[《「"']([^》」"']{2,32})[》」"']\s*(?:歌单|playlist)/i,
+            /(?:playlist|歌单)\s*[《「"']([^》」"']{2,32})[》」"']/i
+        ];
+
+        for (const pattern of patterns) {
+            const match = text.match(pattern);
+            const value = match?.[1]?.trim();
+            if (value && !/(歌曲|曲目|音乐|播放|推荐)/.test(value)) {
+                return value.slice(0, 32);
+            }
+        }
+
+        return '';
+    }
+
+    function inferPlaylistTheme(content) {
+        const text = String(content || '').toLowerCase();
+        const themes = [
+            ['夜跑', ['夜跑', '跑步', '运动', 'workout', 'run']],
+            ['学习', ['学习', '专注', '写作业', 'focus', 'study']],
+            ['睡前', ['睡前', '晚安', '助眠', '睡觉', 'sleep']],
+            ['通勤', ['通勤', '路上', '开车', '地铁', 'commute']],
+            ['治愈', ['治愈', '放松', '安静', '舒缓', 'relax', 'chill']],
+            ['开心', ['开心', '快乐', '高兴', 'happy']],
+            ['伤感', ['伤感', '难过', 'emo', 'sad']],
+            ['派对', ['派对', '聚会', 'party']]
+        ];
+        const found = themes.find(([, words]) => words.some(word => text.includes(word)));
+        return found?.[0] || '';
+    }
+
+    function buildAIPlaylistName(content, explicitName = '') {
+        if (explicitName) return explicitName;
+
+        const artistQuery = extractArtistRecommendationQuery(content);
+        if (artistQuery) return `AI推荐：${artistQuery}`;
+
+        const theme = inferPlaylistTheme(content);
+        if (theme) return `AI推荐：${theme}`;
+
+        const cleaned = String(content || '')
+            .replace(/(帮我|请|给我|麻烦|创建|建立|生成|新建|做|整理|推荐|一个|一份|一些|几首|几支|点|些|并|然后|顺便|歌单|playlist|音乐|歌曲|适合|的|吧|谢谢)/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        return cleaned ? `AI推荐：${cleaned.slice(0, 16)}` : 'AI推荐歌单';
+    }
+
+    function cleanupSongQuery(value) {
+        return String(value || '')
+            .replace(/^[\s"'《》「」“”]+|[\s"'《》「」“”]+$/g, '')
+            .replace(/^(歌曲|歌|曲目|音乐)\s*/i, '')
+            .replace(/\s*(这几首|这些歌|创建歌单|生成歌单|做成歌单|加入歌单|歌单|playlist|谢谢|吧)$/i, '')
+            .trim();
+    }
+
+    function splitSongQueryList(value) {
+        return String(value || '')
+            .split(/(?:\s+(?:and|&)\s+)|(?:\s*和\s*)|[、,，;；\n]+/i)
+            .map(cleanupSongQuery)
+            .filter(item => item && item.length <= 80 && !/^(歌单|playlist)$/i.test(item));
+    }
+
+    function extractPlaylistSongQueries(content) {
+        const raw = String(content || '').trim();
+        const queries = [];
+        const quotedPattern = /[《「“"]([^》」”"]{1,80})[》」”"]/g;
+        let match;
+        while ((match = quotedPattern.exec(raw)) !== null) {
+            const prefix = raw.slice(Math.max(0, match.index - 8), match.index);
+            const suffix = raw.slice(match.index + match[0].length, match.index + match[0].length + 8);
+            if (/(叫|名|命名|named|called)\s*$/i.test(prefix) || /^\s*(歌单|playlist)/i.test(suffix)) continue;
+            queries.push(cleanupSongQuery(match[1]));
+        }
+
+        const listPatterns = [
+            /(?:包含|包括|收录|放进|加入|歌曲(?:有)?|曲目|with|including)\s*[:：]?\s*(.+)$/i,
+            /[：:]\s*(.+)$/i,
+            /用\s*(.+?)\s*(?:创建|建立|生成|新建|做|整理).*(?:歌单|playlist)/i,
+            /把\s*(.+?)\s*(?:创建|建立|生成|新建|做|整理|变成).*(?:歌单|playlist)/i
+        ];
+
+        for (const pattern of listPatterns) {
+            const listMatch = raw.match(pattern);
+            if (!listMatch?.[1]) continue;
+            queries.push(...splitSongQueryList(listMatch[1]));
+        }
+
+        return [...new Set(queries.map(cleanupSongQuery).filter(Boolean))].slice(0, AI_PLAYLIST_MAX_TRACKS);
+    }
+
+    function shouldUseExistingRecommendations(content) {
+        const text = String(content || '').toLowerCase();
+        return aiRecommendedTracks.length > 0 &&
+            /(刚才|刚刚|上面|之前|推荐的|这些|这几首|当前推荐|current|previous).*(歌|音乐|推荐|歌单|playlist)/i.test(text);
+    }
+
+    function shouldCreateSimilarPlaylist(content) {
+        const text = String(content || '').toLowerCase();
+        return /(相似|类似|同风格|像这首|根据这首|基于这首|similar|like this)/i.test(text);
+    }
+
+    function inferNeteaseMoodTag(content) {
+        const text = String(content || '').toLowerCase();
+        const matchedTag = neteaseMoodTags.find(tag => tag.name && text.includes(String(tag.name).toLowerCase()));
+        if (matchedTag?.name) return matchedTag.name;
+
+        const aliases = [
+            { tag: '夜晚', words: ['睡前', '晚安', '深夜', '夜晚', '夜跑'] },
+            { tag: '学习', words: ['学习', '专注', 'focus', 'study'] },
+            { tag: '工作', words: ['工作', '办公'] },
+            { tag: '运动', words: ['跑步', '运动', '健身', 'workout'] },
+            { tag: '治愈', words: ['治愈', '疗愈', '舒缓'] },
+            { tag: '放松', words: ['放松', '安静', 'chill', 'relax'] },
+            { tag: '孤独', words: ['孤独', 'emo', '伤感', '难过'] }
+        ];
+        return aliases.find(item => item.words.some(word => text.includes(word)))?.tag || '';
+    }
+
+    async function fetchNeteaseCandidatesForPrompt(content) {
+        const tag = inferNeteaseMoodTag(content);
+        try {
+            if (tag) {
+                const payload = await requestJsonFromCSharp('getNeteaseMoodTracks', JSON.stringify({ tag, limit: AI_PLAYLIST_MAX_TRACKS }), 60000);
+                return Array.isArray(payload.tracks) ? payload.tracks.map(normalizeTrack) : [];
+            }
+
+            return await fetchStarterNeteaseTracks();
+        } catch (error) {
+            console.warn('NetEase playlist candidates unavailable:', error);
+            return [];
+        }
+    }
+
+    async function buildSimilarPlaylistCandidates(content) {
+        const snapshot = getNowPlayingSnapshot();
+        const currentTrack = snapshot.track;
+        if (!currentTrack) return [];
+
+        const query = [currentTrack.artist, currentTrack.title].filter(Boolean).join(' ');
+        const localMatches = searchLocalTracks(query, AI_PLAYLIST_MAX_TRACKS);
+        let neteaseMatches = [];
+        try {
+            neteaseMatches = await searchNeteaseTracks(query, AI_PLAYLIST_MAX_TRACKS);
+        } catch (error) {
+            console.warn('Similar NetEase search failed:', error);
+        }
+
+        return uniqueRecommendationTracks([
+            currentTrack,
+            ...neteaseMatches,
+            ...localMatches
+        ]).slice(0, AI_PLAYLIST_MAX_TRACKS);
+    }
+
+    async function buildRecommendedPlaylistCandidates(content) {
+        if (shouldUseExistingRecommendations(content)) {
+            return uniqueRecommendationTracks(aiRecommendedTracks).slice(0, AI_PLAYLIST_MAX_TRACKS);
+        }
+
+        const artistQuery = extractArtistRecommendationQuery(content);
+        if (artistQuery) {
+            const artistTracks = await buildArtistPlaylistCandidates(artistQuery);
+            return artistTracks;
+        }
+
+        if (shouldCreateSimilarPlaylist(content)) {
+            const similarTracks = await buildSimilarPlaylistCandidates(content);
+            if (similarTracks.length > 0) return similarTracks;
+        }
+
+        const localCandidates = recommendLocalTracks(content, AI_PLAYLIST_MAX_TRACKS);
+        const neteaseCandidates = await fetchNeteaseCandidatesForPrompt(content);
+        const preferNeteaseFirst = Boolean(inferNeteaseMoodTag(content)) || localCandidates.length === 0;
+        return uniqueRecommendationTracks(preferNeteaseFirst
+            ? [...neteaseCandidates, ...localCandidates]
+            : [...localCandidates, ...neteaseCandidates]
+        ).slice(0, AI_PLAYLIST_MAX_TRACKS);
+    }
+
+    async function resolvePlaylistSongQueries(queries) {
+        const resolvedTracks = [];
+        const missing = [];
+
+        for (const query of queries.slice(0, AI_PLAYLIST_MAX_TRACKS)) {
+            const localMatches = searchLocalTracks(query, 3);
+            let neteaseMatches = [];
+            try {
+                neteaseMatches = await searchNeteaseTracks(query, 5);
+            } catch (error) {
+                console.warn(`NetEase search failed for "${query}":`, error);
+            }
+
+            const candidates = uniqueTracks([...neteaseMatches, ...localMatches]);
+            const selected = chooseBestTrackMatch(query, candidates) || candidates[0];
+            if (selected) {
+                resolvedTracks.push(selected);
+            } else {
+                missing.push(query);
+            }
+        }
+
+        return {
+            tracks: uniqueRecommendationTracks(resolvedTracks).slice(0, AI_PLAYLIST_MAX_TRACKS),
+            missing
+        };
+    }
+
+    function shouldAutoPlayCreatedPlaylist(content) {
+        const text = String(content || '').toLowerCase();
+        if (/(不要|先不|不用|别).*(播放|放|play)/i.test(text)) return false;
+        return /(并|然后|顺便|直接|马上|现在).*(播放|开播|放一下|放)|(?:播放|放一下|开播).*(歌单|playlist)|play (?:it|this|the playlist)/i.test(text);
+    }
+
+    function formatPlaylistCreatedResponse(name, tracksForPlaylist, missing = [], playbackTrack = null) {
+        const preview = tracksForPlaylist
+            .slice(0, 8)
+            .map((track, index) => `${index + 1}. ${formatRecommendedTrack(track)}`)
+            .join('\n');
+        const moreText = tracksForPlaylist.length > 8 ? `\n...还有 ${tracksForPlaylist.length - 8} 首` : '';
+        const missingText = missing.length > 0 ? `\n未找到：${missing.join('、')}` : '';
+        const playbackText = playbackTrack ? `\n已开始播放：${formatRecommendedTrack(playbackTrack)}。` : '';
+
+        return `已创建歌单《${name}》，共 ${tracksForPlaylist.length} 首。${playbackText}\n${preview}${moreText}${missingText}`;
+    }
+
+    async function createAIPlaylistFromChat(content) {
+        const explicitName = extractPlaylistName(content);
+        const playlistName = buildAIPlaylistName(content, explicitName);
+        const songQueries = extractPlaylistSongQueries(content);
+        let playlistTracks = [];
+        let missing = [];
+
+        if (songQueries.length > 0) {
+            const resolved = await resolvePlaylistSongQueries(songQueries);
+            playlistTracks = resolved.tracks;
+            missing = resolved.missing;
+        } else {
+            playlistTracks = await buildRecommendedPlaylistCandidates(content);
+        }
+
+        if (playlistTracks.length === 0) {
+            throw new Error('没有找到可用于创建歌单的歌曲。可以先扫描本地曲库，或启动 NeteaseCloudMusicApi 后再试。');
+        }
+
+        setAIRecommendations(playlistTracks, playlistName);
+        selectAIRecommendationPlaylist();
+
+        let playbackTrack = null;
+        if (shouldAutoPlayCreatedPlaylist(content)) {
+            const playback = await playTrackCollectionConfirmed(aiRecommendedTracks, 0);
+            playbackTrack = playback.track || aiRecommendedTracks[0];
+            setLastAssistantPlaybackContext(playbackTrack, `根据你的要求创建并播放歌单《${playlistName}》`, playlistName);
+        }
+
+        return formatPlaylistCreatedResponse(playlistName, aiRecommendedTracks, missing, playbackTrack);
+    }
+
+    function formatFocusedRecommendationResponse(name, tracksForPlaylist, artistQuery = '') {
+        const preview = tracksForPlaylist
+            .slice(0, 8)
+            .map((track, index) => `${index + 1}. ${formatRecommendedTrack(track)}`)
+            .join('\n');
+        const moreText = tracksForPlaylist.length > 8 ? `\n...还有 ${tracksForPlaylist.length - 8} 首已放进 AI 推荐歌单。` : '';
+        const reason = artistQuery
+            ? `我按歌手“${artistQuery}”优先匹配了歌手字段和搜索结果。`
+            : '我按这次对话里的音乐主题整理了候选歌曲。';
+
+        return `已为你整理《${name}》，共 ${tracksForPlaylist.length} 首。\n${reason}\n${preview}${moreText}`;
+    }
+
+    async function tryBuildFocusedRecommendation(content) {
+        const artistQuery = extractArtistRecommendationQuery(content);
+        if (!artistQuery) return null;
+
+        const recommendedTracks = await buildArtistPlaylistCandidates(artistQuery);
+        if (recommendedTracks.length === 0) {
+            throw new Error(`没有找到“${artistQuery}”的可播放歌曲。可以检查网易云 API 是否启动，或先同步/扫描曲库。`);
+        }
+
+        const playlistName = buildAIPlaylistName(content);
+        setAIRecommendations(recommendedTracks, playlistName);
+        selectAIRecommendationPlaylist();
+        return formatFocusedRecommendationResponse(playlistName, aiRecommendedTracks, artistQuery);
+    }
+
+    function addCurrentTrackToLikedFromChat() {
+        const snapshot = getNowPlayingSnapshot();
+        if (!snapshot.track) {
+            return '当前播放器里没有可收藏的歌曲。';
+        }
+
+        const track = normalizeTrack(snapshot.track);
+        if (isTrackLiked(track)) {
+            return `${formatRecommendedTrack(track)} 已经在“我喜欢的音乐”里。`;
+        }
+
+        likedTracks = uniqueTracks([...likedTracks, track]);
+        saveLikedTracks();
+        return `已把 ${formatRecommendedTrack(track)} 加入“我喜欢的音乐”。`;
+    }
+
+    function removeCurrentTrackFromLikedFromChat() {
+        const snapshot = getNowPlayingSnapshot();
+        if (!snapshot.track) {
+            return '当前播放器里没有可移出的歌曲。';
+        }
+
+        const key = getTrackLikeKey(snapshot.track);
+        const before = likedTracks.length;
+        likedTracks = likedTracks.filter(track => getTrackLikeKey(track) !== key);
+        saveLikedTracks();
+        if (selectedPlaylist?.isLikedPlaylist && likedTracks.length === 0) {
+            selectedPlaylist = getLibraryPlaylists()[0] || null;
+        }
+
+        return before === likedTracks.length
+            ? `${formatRecommendedTrack(snapshot.track)} 不在“我喜欢的音乐”里。`
+            : `已从“我喜欢的音乐”移出 ${formatRecommendedTrack(snapshot.track)}。`;
+    }
+
+    function isDeleteAIRecommendationPlaylistRequest(content) {
+        const text = String(content || '').trim().toLowerCase();
+        if (!text) return false;
+
+        const hasDeleteIntent = /(删除|删掉|移除|清空|清除|不要|取消|delete|remove|clear)/i.test(text);
+        const hasPlaylistCue = /(歌单|playlist|列表)/i.test(text);
+        const hasTrackCue = /(这首|当前歌曲|正在播放|歌曲|曲目|song|track)/i.test(text);
+
+        return hasDeleteIntent && hasPlaylistCue && !hasTrackCue;
+    }
+
+    function deleteAIRecommendationPlaylistFromChat(content = '') {
+        const text = String(content || '').trim().toLowerCase();
+        const isOtherPlaylist = /(网易云|netease|本地|文件夹|我喜欢|喜欢的音乐|收藏)/i.test(text) &&
+            !/(ai|推荐|刚才|刚刚|上面|之前|创建|生成|这个|这份)/i.test(text);
+        if (isOtherPlaylist) {
+            return '目前只能删除 AI 推荐歌单；网易云、本地文件夹和“我喜欢的音乐”不会在这里删除。';
+        }
+
+        if (aiRecommendedTracks.length === 0) {
+            localStorage.removeItem(AI_RECOMMENDATIONS_STORAGE_KEY);
+            return '当前没有可删除的 AI 推荐歌单。';
+        }
+
+        const deletedName = clearAIRecommendations();
+        return `已删除 AI 推荐歌单《${deletedName}》。`;
+    }
+
+    function tryExecuteLibraryCommand(content) {
+        const text = String(content || '').trim().toLowerCase();
+        if (isDeleteAIRecommendationPlaylistRequest(text)) {
+            return deleteAIRecommendationPlaylistFromChat(text);
+        }
+
+        if (/(打开|显示|看看|查看|show|open).*(ai|推荐).*(歌单|playlist)/i.test(text) && aiRecommendedTracks.length > 0) {
+            selectAIRecommendationPlaylist();
+            currentView = 'library';
+            return `已打开歌单《${aiRecommendationPlaylistName || 'AI Recommendations'}》。`;
+        }
+
+        if (/(取消喜欢|移出喜欢|取消收藏|移出收藏|unlike|remove.*favorite)/i.test(text) &&
+            /(这首|当前|正在|播放|song|track|this)/i.test(text)) {
+            return removeCurrentTrackFromLikedFromChat();
+        }
+
+        if (/(加入我喜欢|加入喜欢|收藏这首|喜欢这首|like this|favorite this)/i.test(text) ||
+            /(把|将).*(这首|当前|正在播放).*(喜欢|收藏|favorite)/i.test(text)) {
+            return addCurrentTrackToLikedFromChat();
+        }
+
+        return null;
+    }
+
     function clampVolume(value) {
         return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
     }
 
+    function updateVolumeSliderUi(nextVolume = volume) {
+        const target = clampVolume(nextVolume);
+        const slider = document.getElementById('volume-slider');
+        if (!slider) return;
+
+        slider.value = target;
+        slider.setAttribute('aria-valuenow', target.toString());
+        slider.style.setProperty('--volume-level', `${target}%`);
+    }
+
+    function parseChineseVolumeTenth(text) {
+        const chineseDigits = {
+            零: 0,
+            一: 1,
+            二: 2,
+            两: 2,
+            三: 3,
+            四: 4,
+            五: 5,
+            六: 6,
+            七: 7,
+            八: 8,
+            九: 9,
+            十: 10
+        };
+        const match = String(text || '').match(/([零一二两三四五六七八九十])成/);
+        if (!match) return null;
+        return clampVolume(chineseDigits[match[1]] * 10);
+    }
+
+    function parseExplicitVolumeValue(text) {
+        const source = String(text || '').toLowerCase();
+        const ratioMatch = source.match(/(?:音量|声音|volume|vol)?\s*(0?\.\d+)\s*(?:倍|ratio)?/);
+        if (ratioMatch && /(音量|声音|volume|vol|倍|ratio)/.test(source)) {
+            return clampVolume(Number(ratioMatch[1]) * 100);
+        }
+
+        const tenthMatch = source.match(/(\d(?:\.\d+)?)\s*成/);
+        if (tenthMatch) {
+            return clampVolume(Number(tenthMatch[1]) * 10);
+        }
+
+        const percentMatch = source.match(/(\d{1,3})\s*(?:%|％|percent|pct)?/);
+        if (percentMatch) {
+            return clampVolume(percentMatch[1]);
+        }
+
+        return parseChineseVolumeTenth(source);
+    }
+
+    function getVolumeDelta(text) {
+        const explicitDelta = String(text || '').match(/(?:加|增加|提高|调大|升高|raise|up|louder|减|减少|降低|调小|lower|down|quieter|softer)\D*(\d{1,3})/i);
+        if (explicitDelta) return Math.max(1, Number(explicitDelta[1]) || 10);
+        if (/(一点点|一点儿|微调|slightly|a little|a bit)/i.test(text)) return 5;
+        if (/(很多|大幅|多一点|重一点|much|far)/i.test(text)) return 20;
+        return 10;
+    }
+
     function parseVolumeTarget(content) {
         const text = String(content || '').toLowerCase();
-        if (!/(音量|声音|声量|volume|vol|静音|mute)/.test(text)) return null;
-        if (/取消静音|解除静音|unmute/.test(text)) return Math.max(volume || 70, 30);
-        if (/静音|mute/.test(text)) return 0;
+        const hasVolumeCue = /(音量|声音|声量|volume|vol|静音|mute|大声|小声|太吵|太大|听不清|louder|quieter|softer|turn it|turn down|turn up)/i.test(text);
+        if (!hasVolumeCue) return null;
 
-        const numeric = text.match(/(\d{1,3})\s*(?:%|％)?/);
-        if (numeric && /(到|为|成|设|设置|调至|调到|音量|volume|vol)/.test(text)) {
-            return clampVolume(numeric[1]);
+        if (/(取消静音|解除静音|unmute)/i.test(text)) return Math.max(volume || 70, 30);
+        if (/静音|mute/.test(text)) return 0;
+        if (/(最大|拉满|满音量|max|maximum|full volume)/i.test(text)) return 100;
+        if (/(最小|最低|minimum|min volume)/i.test(text)) return 5;
+        if (/(一半|半音量|半格|half)/i.test(text)) return 50;
+
+        const hasSetIntent = /(到|为|成|设|设置|调至|调到|设为|变成|音量|声音|volume|vol|set|to)/i.test(text);
+        const explicitValue = parseExplicitVolumeValue(text);
+        if (explicitValue !== null && hasSetIntent) {
+            return explicitValue;
         }
 
-        const deltaMatch = text.match(/(?:加|增加|提高|调大|升高|raise|up|louder|减|减少|降低|调小|down|quieter)\D*(\d{1,3})/);
-        const delta = deltaMatch ? Number(deltaMatch[1]) : 10;
-        if (/(加|增加|提高|调大|升高|raise|up|louder|大一点|高一点)/.test(text)) {
+        const delta = getVolumeDelta(text);
+        if (/(加|增加|提高|调大|升高|大声|大一点|高一点|听不清|raise|up|louder|turn up)/i.test(text)) {
             return clampVolume(volume + delta);
         }
-        if (/(减|减少|降低|调小|down|quieter|小一点|低一点)/.test(text)) {
+        if (/(减|减少|降低|调小|小声|小一点|低一点|太吵|太大|lower|down|quieter|softer|turn down)/i.test(text)) {
             return clampVolume(volume - delta);
         }
 
@@ -2671,10 +3294,15 @@
 
     async function setVolumeConfirmed(nextVolume) {
         const target = clampVolume(nextVolume);
-        await requestJsonFromCSharp('setVolume', target.toString(), 10000);
         volume = target;
+        updateVolumeSliderUi(target);
+
+        const payload = await requestJsonFromCSharp('setVolume', JSON.stringify({ percent: target }), 10000);
+        const confirmed = clampVolume(toFiniteNumber(payload.volume, target));
+        volume = confirmed;
+        updateVolumeSliderUi(confirmed);
         renderPlayer();
-        return `音量已调到 ${target}%。`;
+        return `音量已调到 ${confirmed}%。`;
     }
 
     async function executeSimplePlaybackAction(action, label) {
@@ -2836,7 +3464,7 @@
             selected,
             ...candidates.filter(track => normalizePathForCompare(getTrackSource(track)) !== normalizePathForCompare(getTrackSource(selected)))
         ]).slice(0, 5);
-        aiRecommendedTracks = queue;
+        setAIRecommendations(queue, `点歌：${cleanQuery}`);
 
         const playback = await playTrackCollectionConfirmed(queue, 0, { detachPlaylist: true });
         const actualTrack = getNowPlayingSnapshot().track || playback.track || selected;
@@ -2847,6 +3475,20 @@
     async function executeAIMusicCommand(content) {
         if (isNowPlayingQuestion(content) || isCurrentSongReasonQuestion(content)) {
             return buildNowPlayingResponse();
+        }
+
+        const libraryResponse = tryExecuteLibraryCommand(content);
+        if (libraryResponse) {
+            return libraryResponse;
+        }
+
+        if (isPlaylistCreationRequest(content)) {
+            return await createAIPlaylistFromChat(content);
+        }
+
+        const recommendationResponse = await tryBuildFocusedRecommendation(content);
+        if (recommendationResponse) {
+            return recommendationResponse;
         }
 
         const controlResponse = await tryExecutePlaybackControl(content);
@@ -3101,9 +3743,9 @@
     }
 
     function syncDesktopLyricsEnabled() {
-        const enabled = Boolean(settings.desktopLyrics);
-        sendToCSharp('setDesktopLyricsEnabled', JSON.stringify({ enabled }));
-        if (!enabled) lastDesktopLyricsPayloadKey = '';
+        const payload = getDesktopLyricsPayload();
+        sendToCSharp('setDesktopLyricsEnabled', JSON.stringify(payload));
+        if (!payload.enabled) lastDesktopLyricsPayloadKey = '';
     }
 
     function getDesktopLyricsPayload() {
@@ -3515,16 +4157,90 @@
         const page = document.getElementById('immersive-player');
         if (!page) return;
 
-        applyImmersivePalette(page, getDefaultImmersivePalette());
-        currentImmersivePaletteKey = '';
+        const paletteKey = getImmersivePaletteKey(state);
+        if (paletteKey && currentImmersivePaletteKey === paletteKey && page.dataset.immersivePaletteKey === paletteKey) return;
+
+        currentImmersivePaletteKey = paletteKey;
+
+        const cachedPalette = immersivePaletteCache.get(paletteKey);
+        if (cachedPalette) {
+            applyImmersivePalette(page, cachedPalette);
+            page.dataset.immersivePaletteKey = paletteKey;
+            return;
+        }
+
+        const fallbackPalette = getFallbackPalette(getImmersivePaletteSeed(state));
+        applyImmersivePalette(page, fallbackPalette);
+        page.dataset.immersivePaletteKey = paletteKey;
+
+        if (!shouldExtractPaletteFromCover(state.coverUrl)) {
+            rememberImmersivePalette(paletteKey, fallbackPalette);
+            return;
+        }
+
+        loadImmersivePaletteFromCover(state.coverUrl)
+            .then(palette => {
+                const resolvedPalette = palette || fallbackPalette;
+                rememberImmersivePalette(paletteKey, resolvedPalette);
+                if (currentImmersivePaletteKey !== paletteKey) return;
+
+                const currentPage = document.getElementById('immersive-player');
+                if (currentPage) {
+                    applyImmersivePalette(currentPage, resolvedPalette);
+                    currentPage.dataset.immersivePaletteKey = paletteKey;
+                }
+            })
+            .catch(error => {
+                console.warn('Immersive cover palette unavailable:', error);
+                rememberImmersivePalette(paletteKey, fallbackPalette);
+            });
     }
 
-    function getDefaultImmersivePalette() {
-        return {
-            accent: { r: 167, g: 139, b: 250 },
-            soft: { r: 236, g: 72, b: 153 },
-            shadow: { r: 8, g: 10, b: 22 }
-        };
+    function getImmersivePaletteKey(state) {
+        const coverUrl = String(state?.coverUrl || '').trim();
+        if (shouldExtractPaletteFromCover(coverUrl)) return `cover:${coverUrl}`;
+        return `fallback:${getImmersivePaletteSeed(state)}`;
+    }
+
+    function getImmersivePaletteSeed(state) {
+        return [
+            state?.coverUrl,
+            state?.title,
+            state?.artist,
+            state?.album,
+            currentSourceUri || currentFilePath
+        ].filter(Boolean).join('|') || 'musicagent';
+    }
+
+    function shouldExtractPaletteFromCover(coverUrl) {
+        const url = String(coverUrl || '').trim();
+        return Boolean(url) && url !== getDefaultCover();
+    }
+
+    function rememberImmersivePalette(key, palette) {
+        if (!key || !palette) return;
+
+        immersivePaletteCache.set(key, palette);
+        if (immersivePaletteCache.size > 40) {
+            const oldestKey = immersivePaletteCache.keys().next().value;
+            immersivePaletteCache.delete(oldestKey);
+        }
+    }
+
+    function loadImmersivePaletteFromCover(coverUrl) {
+        return new Promise(resolve => {
+            const image = new Image();
+            const url = String(coverUrl || '').trim();
+            const isRemoteUrl = /^https?:\/\//i.test(url);
+
+            if (isRemoteUrl) {
+                image.crossOrigin = 'anonymous';
+            }
+
+            image.onload = () => resolve(extractPaletteFromImage(image));
+            image.onerror = () => resolve(null);
+            image.src = url;
+        });
     }
 
     function extractPaletteFromImage(image) {
@@ -3535,8 +4251,15 @@
         const context = canvas.getContext('2d', { willReadFrequently: true });
         if (!context) return null;
 
-        context.drawImage(image, 0, 0, size, size);
-        const data = context.getImageData(0, 0, size, size).data;
+        let data;
+        try {
+            context.drawImage(image, 0, 0, size, size);
+            data = context.getImageData(0, 0, size, size).data;
+        } catch (error) {
+            console.warn('Unable to read cover pixels:', error);
+            return null;
+        }
+
         const buckets = [];
         for (let i = 0; i < data.length; i += 16) {
             const r = data[i];
@@ -3553,13 +4276,17 @@
         if (buckets.length === 0) return null;
         buckets.sort((a, b) => b.score - a.score);
         const accent = buckets[0];
-        const soft = buckets[Math.min(8, buckets.length - 1)] || accent;
+        const soft = buckets.find(color => getColorDistance(color, accent) > 58) || buckets[Math.min(8, buckets.length - 1)] || accent;
         const shadow = {
             r: Math.max(2, Math.round(accent.r * 0.08)),
             g: Math.max(6, Math.round(accent.g * 0.08)),
             b: Math.max(12, Math.round(accent.b * 0.09))
         };
         return { accent, soft, shadow };
+    }
+
+    function getColorDistance(a, b) {
+        return Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
     }
 
     function applyImmersivePalette(page, palette) {
@@ -3955,16 +4682,16 @@
                 <div class="card">
                     <h2 class="text-xl font-semibold mb-6">歌词显示</h2>
                     <div class="space-y-4">
-                        <div class="flex items-center justify-between">
-                            <div>
-                                <div class="font-medium">桌面歌词</div>
-                                <div class="text-sm text-gray-400">在桌面上显示当前播放歌曲的同步歌词</div>
-                            </div>
-                            <label class="switch">
+                        <label class="flex items-center justify-between cursor-pointer select-none">
+                            <span>
+                                <span class="block font-medium">桌面歌词</span>
+                                <span class="block text-sm text-gray-400">在桌面上显示当前播放歌曲的同步歌词</span>
+                            </span>
+                            <span class="switch">
                                 <input type="checkbox" id="desktop-lyrics" ${settings.desktopLyrics ? 'checked' : ''}>
                                 <span class="slider"></span>
-                            </label>
-                        </div>
+                            </span>
+                        </label>
                     </div>
                 </div>
                 <div class="card">
@@ -4062,6 +4789,7 @@
         const displayTime = getEstimatedCurrentTime();
         const displayProgress = getPlaybackProgressPercent(displayTime);
         const currentLiked = isCurrentTrackLiked();
+        const displayVolume = clampVolume(volume);
         return `
             <div class="player-bar px-6 flex items-center gap-6 text-white">
                 <div class="flex items-center gap-4 w-80">
@@ -4102,10 +4830,10 @@
                         <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
                         <span>${getPlaybackStrategyLabel()}</span>
                     </button>
-                    <div class="flex items-center gap-2">
+                    <label class="volume-control flex items-center gap-2" title="音量">
                         <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
-                        <input type="range" id="volume-slider" min="0" max="100" value="${volume}" class="w-24">
-                    </div>
+                        <input type="range" id="volume-slider" class="volume-slider" min="0" max="100" step="1" value="${displayVolume}" style="--volume-level: ${displayVolume}%;" aria-label="音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${displayVolume}">
+                    </label>
                 </div>
             </div>
         `;
@@ -4399,9 +5127,32 @@
 
         const volumeSlider = document.getElementById('volume-slider');
         if (volumeSlider) {
+            volumeSlider.addEventListener('pointerdown', () => {
+                isVolumeSliderDragging = true;
+            });
+            volumeSlider.addEventListener('pointerup', () => {
+                isVolumeSliderDragging = false;
+            });
+            volumeSlider.addEventListener('pointercancel', () => {
+                isVolumeSliderDragging = false;
+            });
+            volumeSlider.addEventListener('blur', () => {
+                isVolumeSliderDragging = false;
+            });
             volumeSlider.addEventListener('input', (e) => {
-                volume = parseFloat(e.target.value);
-                sendToCSharp('setVolume', volume.toString());
+                isVolumeSliderDragging = true;
+                volume = clampVolume(e.target.value);
+                updateVolumeSliderUi(volume);
+                sendToCSharp('setVolume', JSON.stringify({ percent: volume }));
+            });
+            volumeSlider.addEventListener('change', async (e) => {
+                isVolumeSliderDragging = false;
+                try {
+                    await setVolumeConfirmed(e.target.value);
+                } catch (error) {
+                    console.warn('Volume change failed:', error);
+                    updateVolumeSliderUi(volume);
+                }
             });
         }
 
@@ -4447,7 +5198,7 @@
                 });
             } else {
                 if (isRecommendationRequest(content)) {
-                    aiRecommendedTracks = recommendLocalTracks(content);
+                    setAIRecommendations(recommendLocalTracks(content), buildAIPlaylistName(content));
                 }
 
                 try {

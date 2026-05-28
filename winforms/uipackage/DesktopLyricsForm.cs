@@ -67,6 +67,7 @@ public sealed class DesktopLyricsForm : Form
 
         Controls.Add(lyricLabel);
         Controls.Add(closeButton);
+        PositionCloseButton();
 
         hoverTimer = new System.Windows.Forms.Timer { Interval = 120 };
         hoverTimer.Tick += (_, _) =>
@@ -98,7 +99,7 @@ public sealed class DesktopLyricsForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        closeButton.Location = new Point(ClientSize.Width - closeButton.Width - 12, 10);
+        PositionCloseButton();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -123,14 +124,24 @@ public sealed class DesktopLyricsForm : Form
                 PositionNearOwnerTop();
             }
 
-            if (!Visible && ownerForm != null)
+            if (!Visible && ownerForm != null && !ownerForm.IsDisposed)
             {
                 Show(ownerForm);
             }
+            else if (!Visible)
+            {
+                Show();
+            }
+
+            TopMost = false;
+            TopMost = true;
+            BringToFront();
+            Invalidate();
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"显示桌面歌词窗体失败: {ex.Message}");
+            throw;
         }
     }
 
@@ -146,7 +157,7 @@ public sealed class DesktopLyricsForm : Form
 
             if (lyricLabel != null && !lyricLabel.IsDisposed)
             {
-                lyricLabel.Text = string.IsNullOrWhiteSpace(payload.Lyric) ? "暂无歌词" : payload.Lyric.Trim();
+                lyricLabel.Text = BuildLyricText(payload);
             }
         }
         catch (Exception ex)
@@ -155,12 +166,32 @@ public sealed class DesktopLyricsForm : Form
         }
     }
 
+    private static string BuildLyricText(DesktopLyricsPayload payload)
+    {
+        var lyric = payload.Lyric?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(lyric))
+        {
+            return lyric;
+        }
+
+        return string.IsNullOrWhiteSpace(payload.Title)
+            ? "\u7b49\u5f85\u64ad\u653e\u97f3\u4e50"
+            : "\u6682\u65e0\u6b4c\u8bcd";
+    }
+
     private void RegisterPointerHandlers(Control control)
     {
         control.MouseEnter += (_, _) => SetHoverState(true);
         control.MouseDown += HandleMouseDown;
         control.MouseMove += HandleMouseMove;
         control.MouseUp += HandleMouseUp;
+    }
+
+    private void PositionCloseButton()
+    {
+        if (closeButton == null || closeButton.IsDisposed) return;
+
+        closeButton.Location = new Point(ClientSize.Width - closeButton.Width - 12, 10);
     }
 
     private void HandleMouseDown(object? sender, MouseEventArgs e)
@@ -198,7 +229,10 @@ public sealed class DesktopLyricsForm : Form
         if (isHovered == hovered) return;
 
         isHovered = hovered;
-        closeButton.Visible = hovered;
+        if (closeButton != null && !closeButton.IsDisposed)
+        {
+            closeButton.Visible = hovered;
+        }
         if (hovered)
         {
             hoverTimer.Start();

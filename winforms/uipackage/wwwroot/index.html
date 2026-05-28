@@ -3,10 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0a0a0f">
     <title>MusicAgent</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="favicon.ico" sizes="any">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        :root {
+            --app-border: rgba(255,255,255,0.065);
+            --panel-shadow: 0 24px 70px rgba(0,0,0,0.24);
+            --scrollbar-thumb: rgba(167,139,250,0.42);
+            --scrollbar-thumb-hover: rgba(236,72,153,0.54);
+            --scrollbar-track: transparent;
+            color-scheme: dark;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        html {
+            background: #0a0a0f;
+            overflow: hidden;
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0a0a0f;
@@ -14,17 +29,52 @@
             overflow: hidden;
         }
         body.theme-light {
+            --app-border: rgba(15,23,42,0.085);
+            --panel-shadow: 0 18px 48px rgba(15,23,42,0.075);
+            --scrollbar-thumb: rgba(124,58,237,0.34);
+            --scrollbar-thumb-hover: rgba(219,39,119,0.46);
+            color-scheme: light;
             background: #f6f3ec;
             color: #172033;
+        }
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+        }
+        *::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+        *::-webkit-scrollbar-track {
+            background: var(--scrollbar-track);
+        }
+        *::-webkit-scrollbar-thumb {
+            background:
+                linear-gradient(180deg, var(--scrollbar-thumb), var(--scrollbar-thumb-hover))
+                border-box;
+            border: 3px solid transparent;
+            border-radius: 999px;
+            background-clip: padding-box;
+        }
+        *::-webkit-scrollbar-thumb:hover {
+            background:
+                linear-gradient(180deg, var(--scrollbar-thumb-hover), var(--scrollbar-thumb))
+                border-box;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        *::-webkit-scrollbar-corner {
+            background: transparent;
         }
         .sidebar {
             width: 256px;
             background: linear-gradient(180deg, #1a1a2e 0%, #12121a 100%);
-            border-right: 1px solid rgba(255,255,255,0.1);
+            border-right: 0;
+            box-shadow: inset -1px 0 0 rgba(255,255,255,0.045);
         }
         body.theme-light .sidebar {
             background: linear-gradient(180deg, #fff7ed 0%, #eef2ff 100%);
-            border-right-color: rgba(15,23,42,0.12);
+            box-shadow: inset -1px 0 0 rgba(15,23,42,0.07);
         }
         .nav-item {
             display: flex;
@@ -47,11 +97,14 @@
         .nav-item.active {
             background: linear-gradient(90deg, rgba(168,85,247,0.2) 0%, rgba(236,72,153,0.2) 100%);
             color: white;
-            border: 1px solid rgba(168,85,247,0.3);
+            border: 1px solid rgba(168,85,247,0.2);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 10px 30px rgba(168,85,247,0.08);
         }
         body.theme-light .nav-item.active {
+            background: linear-gradient(90deg, rgba(168,85,247,0.16) 0%, rgba(236,72,153,0.13) 100%);
             color: #111827;
-            border-color: rgba(168,85,247,0.35);
+            border-color: rgba(168,85,247,0.16);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.58), 0 10px 28px rgba(124,58,237,0.09);
         }
         .content-area {
             flex: 1;
@@ -63,16 +116,18 @@
             flex: 1;
             overflow-y: auto;
             padding: 24px;
+            scrollbar-gutter: stable;
         }
         .player-bar {
             height: 96px;
             background: linear-gradient(90deg, rgba(26,26,46,0.95) 0%, rgba(18,18,26,0.95) 100%);
-            border-top: 1px solid rgba(255,255,255,0.1);
+            border-top: 0;
             backdrop-filter: blur(20px);
+            box-shadow: 0 -18px 44px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.045);
         }
         body.theme-light .player-bar {
             background: linear-gradient(90deg, rgba(255,247,237,0.95) 0%, rgba(239,246,255,0.95) 100%);
-            border-top-color: rgba(15,23,42,0.12);
+            box-shadow: 0 -14px 40px rgba(15,23,42,0.06), inset 0 1px 0 rgba(15,23,42,0.07);
         }
         .gradient-text {
             background: linear-gradient(90deg, #a78bfa 0%, #ec4899 100%);
@@ -83,13 +138,14 @@
             background: linear-gradient(135deg, rgba(26,26,46,0.8) 0%, rgba(18,18,26,0.8) 100%);
             backdrop-filter: blur(20px);
             border-radius: 16px;
-            border: 1px solid rgba(255,255,255,0.1);
+            border: 1px solid var(--app-border);
             padding: 24px;
+            box-shadow: var(--panel-shadow), inset 0 1px 0 rgba(255,255,255,0.035);
         }
         body.theme-light .card {
-            background: linear-gradient(135deg, rgba(255,255,255,0.88) 0%, rgba(248,250,252,0.84) 100%);
-            border-color: rgba(15,23,42,0.12);
-            box-shadow: 0 18px 50px rgba(15,23,42,0.08);
+            background: linear-gradient(135deg, rgba(255,255,255,0.94) 0%, rgba(248,250,252,0.9) 100%);
+            border-color: var(--app-border);
+            box-shadow: var(--panel-shadow), inset 0 1px 0 rgba(255,255,255,0.75);
         }
         .play-button {
             width: 48px;
@@ -154,6 +210,60 @@
             background: rgba(255,255,255,0.12);
             border-radius: 6px;
         }
+        .volume-control {
+            min-width: 170px;
+            padding: 8px 10px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            transition: background 0.2s ease, border-color 0.2s ease;
+        }
+        .volume-control:hover,
+        .volume-control:focus-within {
+            background: rgba(255,255,255,0.075);
+            border-color: rgba(167,139,250,0.24);
+        }
+        .volume-slider {
+            width: 128px;
+            height: 20px !important;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #a78bfa 0 var(--volume-level, 70%), rgba(255,255,255,0.14) var(--volume-level, 70%) 100%) !important;
+        }
+        .volume-slider::-webkit-slider-runnable-track {
+            height: 6px !important;
+            border-radius: 999px;
+            background: transparent !important;
+        }
+        .volume-slider::-webkit-slider-thumb {
+            width: 20px !important;
+            height: 20px !important;
+            margin-top: -7px !important;
+            box-shadow: 0 0 0 9px rgba(167,139,250,0.12), 0 4px 14px rgba(0,0,0,0.24) !important;
+        }
+        .volume-slider::-moz-range-track {
+            height: 6px !important;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.14) !important;
+        }
+        .volume-slider::-moz-range-progress {
+            height: 6px;
+            border-radius: 999px;
+            background: #a78bfa;
+        }
+        .volume-slider::-moz-range-thumb {
+            width: 20px !important;
+            height: 20px !important;
+            box-shadow: 0 0 0 9px rgba(167,139,250,0.12), 0 4px 14px rgba(0,0,0,0.24) !important;
+        }
+        body.theme-light .volume-control {
+            background: rgba(15,23,42,0.045);
+            border-color: rgba(15,23,42,0.08);
+        }
+        body.theme-light .volume-control:hover,
+        body.theme-light .volume-control:focus-within {
+            background: rgba(124,58,237,0.08);
+            border-color: rgba(124,58,237,0.2);
+        }
         .chart-bar {
             transition: height 0.3s ease;
         }
@@ -164,17 +274,25 @@
             margin-bottom: 12px;
         }
         .message-user {
-            background: linear-gradient(90deg, rgba(168,85,247,0.2) 0%, rgba(236,72,153,0.2) 100%);
-            border: 1px solid rgba(168,85,247,0.3);
+            background: linear-gradient(90deg, rgba(168,85,247,0.22) 0%, rgba(236,72,153,0.2) 100%);
+            border: 1px solid rgba(168,85,247,0.2);
             margin-left: auto;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.045);
         }
         .message-ai {
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: rgba(255,255,255,0.045);
+            border: 1px solid var(--app-border);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+        }
+        body.theme-light .message-user {
+            background: linear-gradient(90deg, rgba(147,51,234,0.16) 0%, rgba(219,39,119,0.13) 100%);
+            border-color: rgba(147,51,234,0.16);
+            color: #312e81;
         }
         body.theme-light .message-ai {
-            background: rgba(15,23,42,0.04);
-            border-color: rgba(15,23,42,0.1);
+            background: rgba(255,255,255,0.76);
+            border-color: rgba(15,23,42,0.075);
+            color: #172033;
         }
         .lyric-line {
             text-align: center;
@@ -193,6 +311,10 @@
             color: #9ca3af;
             transform: scale(0.85);
             opacity: 0.35;
+        }
+        body.theme-light .lyric-inactive {
+            color: #475569;
+            opacity: 0.5;
         }
         .immersive-player {
             --accent-rgb: 96, 184, 255;
@@ -616,6 +738,9 @@
             transition: transform 0.2s;
             position: relative;
             overflow: hidden;
+            color: white;
+            border: 1px solid rgba(255,255,255,0.14);
+            box-shadow: 0 18px 38px rgba(15,23,42,0.14);
         }
         .mood-card:hover { transform: scale(1.05); }
         .mood-card::after {
@@ -653,6 +778,12 @@
         }
         input:checked + .slider { background-color: #a78bfa; }
         input:checked + .slider:before { transform: translateX(24px); }
+        body.theme-light .slider {
+            background-color: rgba(15,23,42,0.22);
+        }
+        body.theme-light input:checked + .slider {
+            background-color: #8b5cf6;
+        }
         .track-row {
             display: flex;
             align-items: center;
@@ -691,17 +822,43 @@
         body.theme-light .text-gray-300 { color: #475569 !important; }
         body.theme-light .text-gray-400,
         body.theme-light .text-gray-500 { color: #64748b !important; }
+        body.theme-light .text-purple-200,
+        body.theme-light .text-purple-300,
+        body.theme-light .text-purple-400 { color: #6d28d9 !important; }
+        body.theme-light .text-red-200,
+        body.theme-light .text-red-300,
+        body.theme-light .text-red-400 { color: #dc2626 !important; }
         body.theme-light [class*="bg-white/5"] { background-color: rgba(15,23,42,0.04) !important; }
         body.theme-light [class*="hover:bg-white/5"]:hover,
         body.theme-light [class*="hover:bg-white/10"]:hover { background-color: rgba(15,23,42,0.08) !important; }
-        body.theme-light [class*="border-white/10"] { border-color: rgba(15,23,42,0.12) !important; }
+        body.theme-dark [class*="border-white/10"] { border-color: rgba(255,255,255,0.065) !important; }
+        body.theme-light [class*="border-white/10"] { border-color: rgba(15,23,42,0.085) !important; }
         body.theme-light input[type="text"],
         body.theme-light input[type="password"] {
-            background: rgba(255,255,255,0.84) !important;
-            border-color: rgba(15,23,42,0.14) !important;
+            background: rgba(255,255,255,0.92) !important;
+            border-color: rgba(15,23,42,0.12) !important;
             color: #111827 !important;
         }
         body.theme-light input::placeholder { color: #64748b; }
+        body.theme-light #send-btn,
+        body.theme-light #start-listening-btn,
+        body.theme-light .play-button {
+            color: white !important;
+        }
+        body.theme-light #send-btn svg,
+        body.theme-light #start-listening-btn svg {
+            color: white !important;
+        }
+        body.theme-light .track-play svg,
+        body.theme-light .play-button svg {
+            color: white !important;
+            fill: white !important;
+        }
+        body.theme-light .ai-discovery-banner,
+        body.theme-light .mood-card,
+        body.theme-light .mood-card .text-white\/70 {
+            color: white !important;
+        }
         body.theme-light .bg-gray-950 { background-color: #f0f0f0 !important; }
         body.theme-light .bg-gray-600 { background-color: #cbd5e1 !important; }
         /* AI Discovery Banner - Keep text white in light theme for readability on dark image */
@@ -747,6 +904,31 @@
         body.theme-light input[type="range"]::-ms-fill-upper {
             background: rgba(15,23,42,0.18) !important;
             border-radius: 6px;
+        }
+        body.theme-light .volume-slider {
+            background: linear-gradient(90deg, #8b5cf6 0 var(--volume-level, 70%), rgba(15,23,42,0.18) var(--volume-level, 70%) 100%) !important;
+        }
+        body.theme-light .volume-slider::-webkit-slider-runnable-track {
+            height: 6px !important;
+            background: transparent !important;
+        }
+        body.theme-light .volume-slider::-webkit-slider-thumb {
+            width: 20px !important;
+            height: 20px !important;
+            margin-top: -7px !important;
+            box-shadow: 0 0 0 9px rgba(124,58,237,0.12), 0 4px 14px rgba(15,23,42,0.16) !important;
+        }
+        body.theme-light .volume-slider::-moz-range-track {
+            height: 6px !important;
+            background: rgba(15,23,42,0.18) !important;
+        }
+        body.theme-light .volume-slider::-moz-range-progress {
+            background: #8b5cf6 !important;
+        }
+        body.theme-light .volume-slider::-moz-range-thumb {
+            width: 20px !important;
+            height: 20px !important;
+            box-shadow: 0 0 0 9px rgba(124,58,237,0.12), 0 4px 14px rgba(15,23,42,0.16) !important;
         }
 
     </style>

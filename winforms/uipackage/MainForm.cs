@@ -1,11 +1,20 @@
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace MusicAgentWinForms;
 
 public class MainForm : Form
 {
+    private const int DwmwaUseImmersiveDarkMode = 20;
+    private const int DwmwaBorderColor = 34;
+    private const int DwmwaCaptionColor = 35;
+    private const int DwmwaTextColor = 36;
+    private const int DwmColorNone = unchecked((int)0xFFFFFFFE);
+    private static readonly Color WindowChromeColor = Color.FromArgb(10, 10, 15);
+    private static readonly Color WindowChromeTextColor = Color.FromArgb(229, 231, 235);
+
     private WebView2 webView = null!;
     private AudioService audioService = null!;
     private DatabaseService dbService = null!;
@@ -26,8 +35,23 @@ public class MainForm : Form
         this.Text = "MusicAgent";
         this.Size = new Size(1400, 900);
         this.StartPosition = FormStartPosition.CenterScreen;
+        this.BackColor = WindowChromeColor;
+        var appIcon = LoadAppIcon();
+        if (appIcon != null)
+        {
+            this.Icon = appIcon;
+        }
         InitializeWebView();
         InitializeServices();
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int attributeValue, int attributeSize);
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        ApplyWindowChrome();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
@@ -35,6 +59,44 @@ public class MainForm : Form
         desktopLyricsForm?.Close();
         desktopLyricsForm?.Dispose();
         base.OnFormClosed(e);
+    }
+
+    private void ApplyWindowChrome()
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10))
+        {
+            return;
+        }
+
+        try
+        {
+            var darkMode = 1;
+            DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref darkMode, sizeof(int));
+
+            var captionColor = ToColorRef(WindowChromeColor);
+            DwmSetWindowAttribute(Handle, DwmwaCaptionColor, ref captionColor, sizeof(int));
+
+            var textColor = ToColorRef(WindowChromeTextColor);
+            DwmSetWindowAttribute(Handle, DwmwaTextColor, ref textColor, sizeof(int));
+
+            var borderColor = DwmColorNone;
+            DwmSetWindowAttribute(Handle, DwmwaBorderColor, ref borderColor, sizeof(int));
+        }
+        catch
+        {
+            // Older Windows builds can ignore unsupported DWM attributes.
+        }
+    }
+
+    private static int ToColorRef(Color color)
+    {
+        return color.R | (color.G << 8) | (color.B << 16);
+    }
+
+    private static Icon? LoadAppIcon()
+    {
+        var iconPath = Path.Combine(Application.StartupPath, "wwwroot", "favicon.ico");
+        return File.Exists(iconPath) ? new Icon(iconPath) : null;
     }
 
     private void InitializeWebView()
@@ -154,6 +216,7 @@ public class MainForm : Form
         {
             var payload = ReadDesktopLyricsPayload(data);
             var enabled = payload.Enabled;
+            lastDesktopLyricsPayload = payload;
             lastDesktopLyricsPayload.Enabled = enabled;
             isDesktopLyricsClosedByUser = false;
 
@@ -245,11 +308,26 @@ public class MainForm : Form
             desktopLyricsForm.CloseRequested += (_, _) =>
             {
                 isDesktopLyricsClosedByUser = true;
+                lastDesktopLyricsPayload.Enabled = false;
                 desktopLyricsForm?.Hide();
+                NotifyDesktopLyricsClosed();
             };
         }
 
         return desktopLyricsForm;
+    }
+
+    private void NotifyDesktopLyricsClosed()
+    {
+        try
+        {
+            var response = new WebMessageResponse { Action = "desktopLyricsClosed", Data = "OK" };
+            webView.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(response));
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"通知桌面歌词关闭失败: {ex.Message}");
+        }
     }
 
     private WebMessageResponse SetImmersiveFullscreen(bool enabled, string id)
