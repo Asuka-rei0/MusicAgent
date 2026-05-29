@@ -52,7 +52,12 @@
         avatarUrl: '',
         apiBaseUrl: 'http://127.0.0.1:3000',
         lastSyncAt: null,
-        playlistCount: 0
+        playlistCount: 0,
+        apiAutoStartStatus: {
+            status: 'idle',
+            message: '尚未检测网易云 API 服务。',
+            managedProcessRunning: false
+        }
     };
     let neteasePlaylists = [];
     let neteaseTracks = [];
@@ -307,11 +312,22 @@
             avatarUrl: payload.avatarUrl || '',
             apiBaseUrl: payload.apiBaseUrl || neteaseStatus.apiBaseUrl,
             lastSyncAt: payload.lastSyncAt || null,
-            playlistCount: Number(payload.playlistCount ?? 0)
+            playlistCount: Number(payload.playlistCount ?? 0),
+            apiAutoStartStatus: normalizeNeteaseApiRuntimeStatus(payload.apiAutoStartStatus ?? payload.ApiAutoStartStatus)
         };
         if (neteaseStatus.loggedIn) {
             sendToCSharp('getNeteasePlaylists');
         }
+    }
+
+    function normalizeNeteaseApiRuntimeStatus(value) {
+        const fallback = neteaseStatus.apiAutoStartStatus || {};
+        if (!value || typeof value !== 'object') return fallback;
+        return {
+            status: value.status ?? value.Status ?? fallback.status ?? 'idle',
+            message: value.message ?? value.Message ?? fallback.message ?? '',
+            managedProcessRunning: Boolean(value.managedProcessRunning ?? value.ManagedProcessRunning ?? false)
+        };
     }
 
     function getMainScrollEl() {
@@ -3540,130 +3556,41 @@
         return 0;
     }
 
-    function buildDonutGradient(data) {
-        const total = data.reduce((sum, item) => sum + Number(item.value || 0), 0);
-        if (total <= 0) return 'conic-gradient(#4b5563 0deg 360deg)';
-
-        let start = 0;
-        const segments = data.map(item => {
-            const value = Number(item.value || 0);
-            const end = start + (value / total) * 360;
-            const segment = `${item.color || '#8B5CF6'} ${start.toFixed(2)}deg ${end.toFixed(2)}deg`;
-            start = end;
-            return segment;
-        });
-
-        return `conic-gradient(${segments.join(', ')})`;
+    function getLibraryViewState() {
+        return {
+            weeklyData,
+            platformData,
+            localPaths,
+            selectedPlaylist,
+            likedTracks,
+            aiRecommendedTracks,
+            neteaseTracks,
+            tracks,
+            neteaseStatus,
+            isNeteaseSyncing,
+            isLoadingNeteaseTracks,
+            isScanningLocalPaths,
+            isPlaying,
+            currentQueueIndex
+        };
     }
 
-    function getWeeklyBarHeight(hours, maxHours) {
-        const value = Number(hours || 0);
-        if (value <= 0) return 0;
-
-        return Math.max((value / maxHours) * 100, 8);
-    }
-
-    function getWeeklyDayTotal(day) {
-        if (day.platforms?.length) {
-            return day.platforms.reduce((sum, slice) => sum + Number(slice.hours || 0), 0);
-        }
-        return Number(day.hours || 0);
-    }
-
-    function getWeeklyMaxHours() {
-        const totals = weeklyData.map(getWeeklyDayTotal);
-        const maxTotal = Math.max(...totals, 0.1);
-        return maxTotal / 0.88;
-    }
-
-    function renderWeeklyStackedBar(day, maxHours) {
-        const platforms = day.platforms || [];
-        const total = getWeeklyDayTotal(day);
-        const barHeightPct = getWeeklyBarHeight(total, maxHours);
-
-        if (total <= 0 || platforms.length === 0) {
-            return `<div class="w-full bg-gray-700/30 rounded-t-lg" style="height:4%"></div>`;
-        }
-
-        const segments = platforms.map(slice => {
-            const segPct = total > 0 ? (Number(slice.hours) / total) * 100 : 0;
-            return `<div class="w-full" style="height:${segPct}%;background:${slice.color};min-height:${slice.hours > 0 ? '2px' : '0'}" title="${escapeHtml(slice.name)} ${slice.hours}h"></div>`;
-        }).join('');
-
-        return `
-            <div class="w-full flex flex-col justify-end rounded-t-lg overflow-hidden" style="height:${barHeightPct}%">
-                ${segments}
-            </div>
-        `;
-    }
-
-    function getWeekTotalHours() {
-        return weeklyData.reduce((sum, day) => {
-            if (day.platforms?.length) {
-                return sum + day.platforms.reduce((inner, slice) => inner + Number(slice.hours || 0), 0);
-            }
-            return sum + Number(day.hours || 0);
-        }, 0);
+    function getLibraryViewDeps() {
+        return {
+            getLibraryPlaylists,
+            escapeHtml,
+            getDefaultCover,
+            renderCoverImg,
+            formatPlatformName
+        };
     }
 
     function renderWeeklyReportCard() {
-        const maxHours = getWeeklyMaxHours();
-        const weekTotalHours = getWeekTotalHours();
-
-        return `
-            <div class="card">
-                <h3 class="text-xl font-semibold mb-6">Weekly Report</h3>
-                <div class="flex items-end gap-3 h-48">
-                    ${weeklyData.map(d => `
-                        <div class="flex-1 h-full flex flex-col items-center justify-end gap-2">
-                            ${renderWeeklyStackedBar(d, maxHours)}
-                            <span class="text-xs text-gray-400">${d.day}</span>
-                        </div>
-                    `).join('')}
-                </div>
-                <div class="mt-4 text-sm text-gray-400">Total: <span class="text-white font-semibold">${weekTotalHours.toFixed(1)} hours</span> this week</div>
-            </div>
-        `;
+        return window.MusicAgentLibraryView.renderWeeklyReportCard(getLibraryViewState(), getLibraryViewDeps());
     }
 
     function renderListeningTimeCard() {
-        const totalHours = platformData.reduce((sum, p) => sum + Number(p.value || 0), 0);
-        const donutGradient = buildDonutGradient(platformData);
-
-        return `
-            <div class="card">
-                <h3 class="text-xl font-semibold mb-6">Listening Time</h3>
-                <div class="flex items-center justify-between">
-                    <div class="w-36 h-36 rounded-full flex items-center justify-center" style="background: ${donutGradient};">
-                        <div class="w-24 h-24 rounded-full bg-gray-950 flex items-center justify-center">
-                            <div class="text-center">
-                            <div class="text-2xl font-bold">${totalHours.toFixed(1)}</div>
-                            <div class="text-xs text-gray-400">Hours</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="flex-1 space-y-3 ml-6">
-                        ${platformData.length > 0 ? platformData.map(p => `
-                            <div class="flex items-center justify-between text-sm">
-                                <div class="flex items-center gap-2">
-                                    <div class="w-3 h-3 rounded-full" style="background-color: ${p.color}"></div>
-                                    <span>${formatPlatformName(p.name)}</span>
-                                </div>
-                                <span class="text-gray-400">${p.value}h</span>
-                            </div>
-                        `).join('') : `
-                            <div class="flex items-center justify-between text-sm">
-                                <div class="flex items-center gap-2">
-                                    <div class="w-3 h-3 rounded-full bg-gray-600"></div>
-                                    <span>No listening data</span>
-                                </div>
-                                <span class="text-gray-400">0h</span>
-                            </div>
-                        `}
-                    </div>
-                </div>
-            </div>
-        `;
+        return window.MusicAgentLibraryView.renderListeningTimeCard(getLibraryViewState(), getLibraryViewDeps());
     }
 
     function renderLibraryStats() {
@@ -4469,6 +4396,17 @@
         `;
     }
 
+    function getNeteaseApiRuntimeHint(fallback) {
+        const runtime = neteaseStatus.apiAutoStartStatus || {};
+        if (runtime.status === 'starting') {
+            return runtime.message || 'NeteaseCloudMusicApi 正在自动启动，请稍后刷新。';
+        }
+        if (runtime.status === 'error' || runtime.status === 'stopped') {
+            return runtime.message || fallback;
+        }
+        return fallback;
+    }
+
     function renderExplore() {
         const moodGradients = ['from-rose-500 to-red-600', 'from-indigo-500 to-sky-600', 'from-emerald-500 to-teal-600', 'from-violet-500 to-fuchsia-600', 'from-amber-500 to-orange-600', 'from-cyan-500 to-blue-600', 'from-pink-500 to-rose-600', 'from-slate-500 to-purple-600'];
         const chartCards = neteaseTopCharts.length > 0
@@ -4497,7 +4435,7 @@
             : `
                 <div class="col-span-4 card text-center text-gray-400">
                     <div class="text-lg font-medium text-white mb-2">${isLoadingNeteaseTopCharts ? '正在加载网易云热榜…' : '暂无网易云热榜数据'}</div>
-                    <div class="text-sm">${isLoadingNeteaseTopCharts ? '请确认 NeteaseCloudMusicApi 正在运行' : '在 Settings 中确认 API 地址后重试'}</div>
+                    <div class="text-sm">${isLoadingNeteaseTopCharts ? getNeteaseApiRuntimeHint('正在等待 NeteaseCloudMusicApi 响应') : getNeteaseApiRuntimeHint('在 Settings 中确认 API 地址后重试')}</div>
                 </div>
             `;
         const moodCards = neteaseMoodTags.length > 0
@@ -4513,7 +4451,7 @@
             : `
                 <div class="col-span-3 card text-center text-gray-400">
                     <div class="text-lg font-medium text-white mb-2">${isLoadingNeteaseMoodTags ? '正在加载心情氛围…' : '暂无心情氛围数据'}</div>
-                    <div class="text-sm">${isLoadingNeteaseMoodTags ? '从网易云歌单分类获取场景与情感标签' : '请检查 NeteaseCloudMusicApi 服务'}</div>
+                    <div class="text-sm">${isLoadingNeteaseMoodTags ? getNeteaseApiRuntimeHint('从网易云歌单分类获取场景与情感标签') : getNeteaseApiRuntimeHint('请检查 NeteaseCloudMusicApi 服务')}</div>
                 </div>
             `;
         return `
@@ -4549,107 +4487,18 @@
     }
 
     function renderLibrary() {
-        const libraryPlaylists = getLibraryPlaylists();
-        const hasLocalLibraries = localPaths.length > 0;
-        const hasNeteasePlaylists = neteasePlaylists.length > 0;
-        const hasAnyPlaylists = libraryPlaylists.length > 0;
-        const trackListTitle = selectedPlaylist?.isLikedPlaylist
-            ? '我喜欢的音乐'
-            : (selectedPlaylist?.isAIRecommendation
-            ? selectedPlaylist.name
-            : (selectedPlaylist?.isNetease
-            ? `${selectedPlaylist.name}（网易云）`
-            : (selectedPlaylist?.isLocal ? selectedPlaylist.name : 'Local Tracks')));
-        const visibleTracks = selectedPlaylist?.isLikedPlaylist
-            ? likedTracks
-            : (selectedPlaylist?.isAIRecommendation
-            ? aiRecommendedTracks
-            : (selectedPlaylist?.isNetease
-            ? neteaseTracks
-            : (selectedPlaylist?.isLocal
-                ? tracks.filter(track => track.filePath && track.filePath.startsWith(selectedPlaylist.path))
-                : tracks)));
-        const emptyTrackText = hasLocalLibraries && isScanningLocalPaths
-            ? '姝ｅ湪璇诲彇宸叉湁姝屽崟姝屾洸...'
-            : '鏆傛棤姝屾洸';
-        const emptyTrackHint = hasLocalLibraries
-            ? '鐐瑰嚮閲嶆柊鎵弿宸蹭繚瀛樼殑鏇插簱璺緞'
-            : 'Click to manually enter an audio file path to play';
-
-        return `
-            <div class="space-y-6">
-                <div class="grid grid-cols-2 gap-6">
-                    <div id="library-weekly-report">${renderWeeklyReportCard()}</div>
-                    <div id="library-listening-time">${renderListeningTimeCard()}</div>
-                </div>
-                <div class="card">
-                    <div class="flex items-center justify-between mb-6">
-                        <h3 class="text-xl font-semibold">歌单</h3>
-                        ${neteaseStatus.loggedIn ? `
-                            <button id="library-sync-netease-btn" class="px-3 py-1.5 text-sm bg-red-500/20 hover:bg-red-500/30 rounded-lg border border-red-500/30 text-red-300 transition-colors" ${isNeteaseSyncing ? 'disabled' : ''}>
-                                ${isNeteaseSyncing ? '同步中…' : '同步网易云'}
-                            </button>
-                        ` : ''}
-                    </div>
-                    <div class="grid grid-cols-5 gap-4">
-                        ${hasAnyPlaylists ? libraryPlaylists.map(playlist => {
-                            const playlistAttrs = playlist.isLikedPlaylist
-                                ? 'data-liked-playlist="true"'
-                                : (playlist.isAIRecommendation
-                                ? 'data-ai-recommendation-playlist="true"'
-                                : (playlist.isNetease ? `data-netease-playlist-id="${playlist.externalId}"` : `data-local-playlist-index="${playlist.sourceIndex}"`));
-                            const badge = playlist.isLikedPlaylist
-                                ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">喜欢</span>'
-                                : (playlist.isAIRecommendation
-                                ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-purple-500/80">AI</span>'
-                                : (playlist.isNetease ? '<span class="absolute top-2 left-2 px-1.5 py-0.5 text-[10px] rounded bg-red-500/80">网易</span>' : ''));
-                            return `
-                            <div class="cursor-pointer rounded-lg p-3 transition-all ${selectedPlaylist && selectedPlaylist.id === playlist.id ? 'bg-purple-500/20 border border-purple-500/50' : 'bg-white/5 border border-transparent hover:bg-white/10'}" ${playlistAttrs}>
-                                <div class="aspect-square rounded-lg overflow-hidden mb-3 relative">
-                                    <img src="${escapeHtml(playlist.cover || getDefaultCover())}" alt="${playlist.name || 'Playlist'}" class="w-full h-full object-cover" loading="lazy" onerror="this.onerror=null;this.src='${escapeHtml(getDefaultCover())}'">
-                                    ${badge}
-                                </div>
-                                <h4 class="font-medium text-sm truncate">${playlist.name || 'Untitled Playlist'}</h4>
-                                <p class="text-xs text-gray-400">${playlist.tracks ?? 0} 首 · ${playlist.duration || '--'}</p>
-                            </div>
-                        `}).join('') : `
-                            <button class="col-span-5 p-8 rounded-lg bg-white/5 border border-white/10 text-center hover:bg-white/10 transition-colors" data-empty-manual-play="true">
-                                <div class="text-lg font-medium mb-2">鏆傛棤姝屾洸</div>
-                                <div class="text-sm text-gray-400">Click to manually enter an audio file path to play</div>
-                            </button>
-                        `}
-                    </div>
-                </div>
-                <div class="card" id="library-track-list">
-                    <h3 class="text-xl font-semibold mb-6">${trackListTitle}${isLoadingNeteaseTracks ? ' <span class="text-sm text-gray-400 font-normal">加载中…</span>' : ''}</h3>
-                    <div class="space-y-2">
-                        ${visibleTracks.length > 0 ? visibleTracks.map((track, index) => `
-                            <div class="track-row group ${isPlaying && currentQueueIndex === index ? 'is-playing' : ''}" data-visible-track-index="${index}">
-                                <div class="w-8 text-gray-400 text-sm shrink-0">${index + 1}</div>
-                                <div class="track-cover">
-                                    ${renderCoverImg(track)}
-                                    <div class="track-play">
-                                        <svg class="w-4 h-4 fill-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                                    </div>
-                                </div>
-                                <div class="flex-1 min-w-0">
-                                    <div class="font-medium truncate">${track.title || 'Untitled Track'}</div>
-                                    <div class="text-sm text-gray-400 truncate">${track.artist || 'Unknown Artist'}</div>
-                                </div>
-                                <div class="text-sm text-gray-400">${track.album || 'Local Music'}</div>
-                                <div class="text-sm text-gray-400 w-16 text-right">${track.duration || '--:--'}</div>
-                            </div>
-                        `).join('') : `
-                            <div class="w-full p-8 rounded-lg bg-white/5 border border-white/10 text-center text-gray-400">
-                                <div class="text-lg font-medium mb-2 text-white">${isLoadingNeteaseTracks ? '正在加载歌单曲目…' : (selectedPlaylist?.isNetease ? '请选择网易云歌单或先同步' : emptyTrackText)}</div>
-                                <div class="text-sm">${isLoadingNeteaseTracks ? '首次打开会从网易云拉取曲目' : (selectedPlaylist?.isNetease ? '曲目加载后会显示在这里' : emptyTrackHint)}</div>
-                            </div>
-                        `}
-                    </div>
-                </div>
-            </div>
-        `;
+        return window.MusicAgentLibraryView.renderLibrary(getLibraryViewState(), getLibraryViewDeps());
     }
+
+    function renderNeteaseApiRuntimeStatus() {
+        const runtime = neteaseStatus.apiAutoStartStatus || {};
+        const message = runtime.message || '应用会自动检测并启动本机 NeteaseCloudMusicApi。';
+        const tone = runtime.status === 'running'
+            ? 'text-emerald-300'
+            : (runtime.status === 'error' ? 'text-red-300' : 'text-gray-400');
+        return `<p class="text-xs ${tone} mt-2">后端状态：${escapeHtml(message)}</p>`;
+    }
+
     function renderSettings() {
         return `
             <div class="max-w-4xl mx-auto space-y-6">
@@ -4747,7 +4596,8 @@
                         <div>
                             <label class="block text-sm text-gray-400 mb-2">API 服务地址（NeteaseCloudMusicApi）</label>
                             <input id="netease-api-url" type="text" value="${escapeHtml(neteaseStatus.apiBaseUrl)}" class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500/50 transition-colors text-white" placeholder="http://127.0.0.1:3000">
-                            <p class="text-xs text-gray-500 mt-2">需在本机先运行 NeteaseCloudMusicApi，默认端口 3000。</p>
+                            <p class="text-xs text-gray-500 mt-2">应用启动时会自动尝试启动本机 NeteaseCloudMusicApi，默认端口 3000。</p>
+                            ${renderNeteaseApiRuntimeStatus()}
                         </div>
                         <button id="save-netease-api-btn" class="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 text-sm transition-colors">保存 API 地址</button>
                     </div>

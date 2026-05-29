@@ -58,6 +58,7 @@ public class MainForm : Form
     {
         desktopLyricsForm?.Close();
         desktopLyricsForm?.Dispose();
+        neteaseService?.Dispose();
         base.OnFormClosed(e);
     }
 

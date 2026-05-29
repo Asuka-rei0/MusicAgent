@@ -6,10 +6,11 @@ using System.Text.Json.Serialization;
 
 namespace MusicAgentWinForms;
 
-public class NeteaseService
+public class NeteaseService : IDisposable
 {
     private readonly MusicDbContext _context;
     private readonly HttpClient _http;
+    private readonly NeteaseApiProcessManager _apiProcessManager = new();
     private readonly CookieContainer _cookieContainer = new();
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -45,6 +46,7 @@ public class NeteaseService
         _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 MusicAgent/1.0");
         EnsureTables();
         LoadStoredCookie();
+        _apiProcessManager.EnsureStartedInBackground(GetApiBaseUrl());
     }
 
     public static NeteaseService Create()
@@ -137,7 +139,15 @@ public class NeteaseService
 
     private async Task<JsonDocument> GetApiAsync(string path, CancellationToken cancellationToken = default)
     {
-        var url = $"{GetApiBaseUrl()}{path}";
+        var apiBaseUrl = GetApiBaseUrl();
+        var autoStartReady = await _apiProcessManager.EnsureStartedAsync(apiBaseUrl, cancellationToken);
+        var runtimeStatus = _apiProcessManager.GetStatus();
+        if (!autoStartReady && runtimeStatus.Status is "starting" or "error" or "stopped")
+        {
+            throw new InvalidOperationException($"网易云 API 未就绪：{runtimeStatus.Message}");
+        }
+
+        var url = $"{apiBaseUrl}{path}";
         using var response = await _http.GetAsync(url, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -189,7 +199,8 @@ public class NeteaseService
             avatarUrl = session.AvatarUrl,
             apiBaseUrl = session.ApiBaseUrl,
             lastSyncAt = session.LastSyncAt?.ToString("o"),
-            playlistCount = _context.NeteasePlaylists.Count()
+            playlistCount = _context.NeteasePlaylists.Count(),
+            apiAutoStartStatus = _apiProcessManager.GetStatus()
         });
     }
 
@@ -213,12 +224,20 @@ public class NeteaseService
             var session = Session;
             session.ApiBaseUrl = url.TrimEnd('/');
             _context.SaveChanges();
+            _apiProcessManager.EnsureStartedInBackground(session.ApiBaseUrl);
             return GetStatus(requestId);
         }
         catch (Exception ex)
         {
             return Error(requestId, "setNeteaseApiBaseUrl", ex.Message);
         }
+    }
+
+    public void Dispose()
+    {
+        _apiProcessManager.Dispose();
+        _http.Dispose();
+        _context.Dispose();
     }
 
     public async Task<WebMessageResponse> StartQrLoginAsync(string requestId = "")
